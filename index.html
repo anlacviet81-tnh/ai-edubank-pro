@@ -166,23 +166,28 @@ const loadResults = async (code) => {
 // ═══════════════════════════════════════════════════════
 // API KEY — lưu trong localStorage máy GV
 // ═══════════════════════════════════════════════════════
-const getApiKey  = () => localStorage.getItem('aedu_api_key') || '';
-const setApiKey  = (k) => localStorage.setItem('aedu_api_key', k.trim());
+const getApiKey   = () => localStorage.getItem('aedu_api_key') || '';
+const setApiKey   = (k) => localStorage.setItem('aedu_api_key', k.trim());
 const clearApiKey = () => localStorage.removeItem('aedu_api_key');
 
 // ═══════════════════════════════════════════════════════
-// AI GENERATION — Claude API (PDF gửi thẳng, không qua OCR)
+// AI GENERATION — Google Gemini API (MIỄN PHÍ)
+// Gemini 2.0 Flash: 1500 request/ngày free, đọc PDF scan như AI Studio
 // ═══════════════════════════════════════════════════════
-const API_URL = "https://api.anthropic.com/v1/messages";
-const MODEL   = "claude-sonnet-4-20250514";
+const GEMINI_MODEL = "gemini-2.0-flash";
+const GEMINI_URL   = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
 
 async function generateBank(topic, material, pdfFiles = []) {
-  // Câu lệnh yêu cầu AI
+  const apiKey = getApiKey();
+  if (!apiKey) throw new Error('Chưa có API Key. Vào Cài đặt → nhập Google Gemini API Key.');
+
   const instruction = `Bạn là chuyên gia sư phạm Việt Nam chuyên thiết kế đề kiểm tra theo thang Bloom.
 
 Chủ đề: "${topic}"
 ${material.trim() ? `Tài liệu bổ sung:\n"""\n${material}\n"""` : ''}
-${pdfFiles.length > 0 ? `(Đã đính kèm ${pdfFiles.length} file tài liệu bên trên — hãy đọc kỹ nội dung trước khi ra đề.)` : 'Sử dụng kiến thức chuẩn chương trình phổ thông Việt Nam.'}
+${pdfFiles.length > 0
+  ? `(Đã đính kèm ${pdfFiles.length} file tài liệu ở trên — hãy đọc kỹ nội dung trước khi ra đề.)`
+  : 'Sử dụng kiến thức chuẩn chương trình phổ thông Việt Nam.'}
 
 NHIỆM VỤ: Dựa vào tài liệu được cung cấp, tạo ngân hàng câu hỏi phân hóa 3 mức A/B/C về chủ đề "${topic}".
 
@@ -214,41 +219,35 @@ JSON CẤU TRÚC BẮT BUỘC:
   ]
 }`;
 
-  // Xây dựng content: đính kèm PDF trực tiếp + câu lệnh
-  const contentParts = [
-    // Các file PDF đính kèm trực tiếp — Claude đọc như AI Studio
+  // Gemini format: parts array — PDF dùng inline_data, text dùng text
+  const parts = [
+    // PDF files đính kèm trực tiếp (Gemini đọc như AI Studio)
     ...pdfFiles.map(f => ({
-      type: "document",
-      source: { type: "base64", media_type: "application/pdf", data: f.base64 },
-      title: f.name,
+      inline_data: { mime_type: "application/pdf", data: f.base64 }
     })),
     // Câu lệnh văn bản
-    { type: "text", text: instruction }
+    { text: instruction }
   ];
 
-  const apiKey = getApiKey();
-  if (!apiKey) throw new Error('Chưa có API Key. Vào Cài đặt → nhập Anthropic API Key.');
-
-  const res = await fetch(API_URL, {
+  const res = await fetch(`${GEMINI_URL}?key=${apiKey}`, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "x-api-key": apiKey,
-      "anthropic-version": "2023-06-01",
-      "anthropic-dangerous-direct-browser-access": "true",
-    },
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      model: MODEL,
-      max_tokens: 4096,
-      messages: [{ role: "user", content: contentParts }]
+      contents: [{ parts }],
+      generationConfig: { temperature: 0.4, maxOutputTokens: 4096 }
     })
   });
+
   if (!res.ok) {
     const e = await res.json().catch(()=>({}));
-    throw new Error(e?.error?.message || `Lỗi API ${res.status}`);
+    const msg = e?.error?.message || `Lỗi API ${res.status}`;
+    if (res.status === 400) throw new Error('API Key sai hoặc không hợp lệ. Kiểm tra lại key.');
+    if (res.status === 429) throw new Error('Quá giới hạn miễn phí hôm nay (1500 request/ngày). Thử lại vào ngày mai.');
+    throw new Error(msg);
   }
+
   const data  = await res.json();
-  const raw   = data.content?.find(b=>b.type==="text")?.text || "";
+  const raw   = data.candidates?.[0]?.content?.parts?.[0]?.text || "";
   const clean = raw.replace(/```json\s*/g,"").replace(/```\s*/g,"").trim();
   try { return JSON.parse(clean); }
   catch {
@@ -359,7 +358,7 @@ function Badge({ level }) {
 }
 
 // ═══════════════════════════════════════════════════════
-// API KEY SCREEN — nhập Anthropic API Key lần đầu
+// API KEY SCREEN — nhập Google Gemini API Key (MIỄN PHÍ)
 // ═══════════════════════════════════════════════════════
 function ApiKeyScreen({ onDone }) {
   const [key,     setKey]     = useState("");
@@ -369,30 +368,28 @@ function ApiKeyScreen({ onDone }) {
 
   const test = async () => {
     const k = key.trim();
-    if (!k.startsWith("sk-ant-")) {
-      setMsg("❌ API Key không đúng. Phải bắt đầu bằng  sk-ant-..."); return;
-    }
+    if (!k || k.length < 20) { setMsg("❌ API Key quá ngắn. Kiểm tra lại."); return; }
     setTesting(true); setMsg("Đang kiểm tra...");
     try {
-      const res = await fetch(API_URL, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "x-api-key": k,
-          "anthropic-version": "2023-06-01",
-          "anthropic-dangerous-direct-browser-access": "true",
-        },
-        body: JSON.stringify({ model: MODEL, max_tokens: 5, messages: [{ role:"user", content:"Hi" }] })
-      });
-      if (res.ok || res.status === 400) {
-        setMsg("✅ API Key hợp lệ! Kết nối thành công."); setOk(true);
-      } else if (res.status === 401) {
-        setMsg("❌ API Key sai hoặc hết hạn. Kiểm tra lại.");
+      const res = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${k}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ contents:[{ parts:[{ text:"Hi" }] }], generationConfig:{ maxOutputTokens:5 } })
+        }
+      );
+      if (res.ok) {
+        setMsg("✅ API Key hợp lệ! Kết nối Gemini thành công."); setOk(true);
+      } else if (res.status === 400) {
+        setMsg("❌ API Key sai. Kiểm tra lại trên aistudio.google.com");
+      } else if (res.status === 403) {
+        setMsg("❌ Key chưa được kích hoạt. Thử tạo key mới.");
       } else {
-        setMsg(`❌ Lỗi ${res.status}. Thử lại sau vài giây.`);
+        setMsg(`❌ Lỗi ${res.status}. Thử lại sau.`);
       }
     } catch(e) {
-      setMsg("❌ Không kết nối được. Cần mở file từ HTTPS (GitHub Pages) — không dùng được ở file:// local.");
+      setMsg("❌ Không kết nối được. Kiểm tra mạng internet.");
     } finally { setTesting(false); }
   };
 
@@ -400,37 +397,48 @@ function ApiKeyScreen({ onDone }) {
     <div style={{minHeight:"100vh",background:"#FBFBFB",display:"flex",alignItems:"center",justifyContent:"center",padding:20}}>
       <div className="fade-in" style={{width:"100%",maxWidth:560,background:"white",borderRadius:26,padding:36,boxShadow:"0 20px 60px rgba(0,0,0,.09)",border:`1px solid ${C.s100}`}}>
         <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:28}}>
-          <div style={{width:48,height:48,background:`linear-gradient(135deg,${C.g600},${C.g700})`,borderRadius:13,display:"flex",alignItems:"center",justifyContent:"center",fontSize:22,boxShadow:`0 6px 20px ${C.g600}30`}}>🔑</div>
+          <div style={{width:48,height:48,background:"linear-gradient(135deg,#4285F4,#34A853)",borderRadius:13,display:"flex",alignItems:"center",justifyContent:"center",fontSize:22,boxShadow:"0 6px 20px rgba(66,133,244,.35)"}}>✨</div>
           <div>
-            <h2 style={{fontSize:20,fontWeight:900,color:C.s900,lineHeight:1.2}}>Nhập Anthropic API Key</h2>
-            <p style={{fontSize:13,color:C.s400,marginTop:3}}>Cần để app gọi Claude AI — thiết lập 1 lần duy nhất</p>
+            <h2 style={{fontSize:20,fontWeight:900,color:C.s900,lineHeight:1.2}}>Nhập Google Gemini API Key</h2>
+            <p style={{fontSize:13,color:C.s400,marginTop:3}}>Hoàn toàn <strong style={{color:"#34A853"}}>miễn phí</strong> — 1500 lần tạo đề/ngày</p>
           </div>
         </div>
 
-        <div style={{background:C.g50,border:`1px solid ${C.g100}`,borderRadius:16,padding:"18px 20px",marginBottom:24}}>
-          <div style={{fontSize:12,fontWeight:900,color:C.g700,textTransform:"uppercase",letterSpacing:"0.1em",marginBottom:12}}>Cách lấy API Key (5 phút)</div>
+        {/* Thông tin miễn phí */}
+        <div style={{background:"#F0FDF4",border:"1px solid #BBF7D0",borderRadius:14,padding:"14px 18px",marginBottom:20,display:"flex",gap:12,alignItems:"flex-start"}}>
+          <span style={{fontSize:20,flexShrink:0}}>🎁</span>
+          <div>
+            <div style={{fontSize:13,fontWeight:800,color:"#166534",marginBottom:4}}>Gemini 2.0 Flash — Hoàn toàn miễn phí</div>
+            <div style={{fontSize:12,color:"#166534",lineHeight:1.6}}>
+              ✓ 1.500 lượt tạo đề mỗi ngày (đủ cho cả trường)<br/>
+              ✓ Đọc PDF scan chuẩn xác — cùng công nghệ với AI Studio<br/>
+              ✓ Không cần thẻ ngân hàng, không hết hạn
+            </div>
+          </div>
+        </div>
+
+        {/* Hướng dẫn */}
+        <div style={{background:C.s50,border:`1px solid ${C.s100}`,borderRadius:14,padding:"16px 18px",marginBottom:20}}>
+          <div style={{fontSize:12,fontWeight:900,color:C.s700,textTransform:"uppercase",letterSpacing:"0.1em",marginBottom:12}}>Cách lấy API Key (2 phút)</div>
           {[
-            ["1","Vào: console.anthropic.com → đăng nhập bằng Google/Email"],
-            ["2","Nhấn \"API Keys\" ở menu trái → nhấn \"Create Key\""],
-            ["3","Đặt tên bất kỳ (VD: EduBank) → nhấn \"Create Key\""],
-            ["4","Copy key bắt đầu bằng sk-ant-... → dán vào ô bên dưới"],
+            ["1","Vào trang: aistudio.google.com (đăng nhập Google)"],
+            ["2","Nhấn nút \"Get API key\" hoặc \"Lấy API key\" ở góc trên trái"],
+            ["3","Nhấn \"Create API key\" → chọn project (hoặc tạo mới)"],
+            ["4","Copy key vừa tạo → dán vào ô bên dưới"],
           ].map(([n,t])=>(
             <div key={n} style={{display:"flex",gap:10,marginBottom:9,alignItems:"flex-start"}}>
-              <span style={{width:22,height:22,borderRadius:"50%",background:C.g600,color:"white",fontSize:11,fontWeight:900,display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,marginTop:1}}>{n}</span>
+              <span style={{width:22,height:22,borderRadius:"50%",background:"#4285F4",color:"white",fontSize:11,fontWeight:900,display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,marginTop:1}}>{n}</span>
               <span style={{fontSize:13,color:C.s700,lineHeight:1.5}}>{t}</span>
             </div>
           ))}
-          <div style={{marginTop:12,padding:"10px 14px",background:"rgba(5,150,105,.08)",borderRadius:10,fontSize:12,color:C.g700,lineHeight:1.6}}>
-            💡 Tài khoản mới được tặng <strong>$5 credit miễn phí</strong> — đủ tạo vài trăm đề bài. Sau đó nạp thêm nếu cần (~$3–5/tháng).
-          </div>
         </div>
 
         <div style={{marginBottom:14}}>
-          <label style={{display:"block",fontSize:10,fontWeight:900,textTransform:"uppercase",letterSpacing:"0.15em",color:C.s400,marginBottom:7}}>Anthropic API Key</label>
+          <label style={{display:"block",fontSize:10,fontWeight:900,textTransform:"uppercase",letterSpacing:"0.15em",color:C.s400,marginBottom:7}}>Google Gemini API Key</label>
           <input value={key} onChange={e=>{setKey(e.target.value);setOk(false);setMsg("");}}
-            placeholder="sk-ant-api03-..." type="password"
-            style={{width:"100%",padding:"13px 16px",background:C.s50,border:`2px solid ${ok?C.g200:C.s200}`,borderRadius:13,fontSize:13,outline:"none",color:C.s900,fontFamily:"monospace",transition:"border-color 0.2s"}}
-            onFocus={e=>e.target.style.borderColor=C.g600} onBlur={e=>e.target.style.borderColor=ok?C.g200:C.s200}/>
+            placeholder="AIza..." type="password"
+            style={{width:"100%",padding:"13px 16px",background:C.s50,border:`2px solid ${ok?"#86EFAC":C.s200}`,borderRadius:13,fontSize:13,outline:"none",color:C.s900,fontFamily:"monospace",transition:"border-color 0.2s"}}
+            onFocus={e=>e.target.style.borderColor="#4285F4"} onBlur={e=>e.target.style.borderColor=ok?"#86EFAC":C.s200}/>
         </div>
 
         {msg && <div style={{padding:"10px 14px",borderRadius:10,marginBottom:14,fontSize:13,fontWeight:600,background:ok?C.g50:C.r50,color:ok?C.g700:C.r600,border:`1px solid ${ok?C.g100:C.r100}`}}>{msg}</div>}
@@ -439,14 +447,14 @@ function ApiKeyScreen({ onDone }) {
           <Btn onClick={test} disabled={!key.trim()||testing} variant="outline" sx={{flex:1}}>
             {testing?<Ic.Spin width={16} height={16} style={{color:C.g600}}/>:I(Ic.Eye)} Kiểm tra kết nối
           </Btn>
-          <Btn onClick={()=>{setApiKey(key.trim());onDone();}} disabled={!ok} sx={{flex:1}}>
+          <Btn onClick={()=>{setApiKey(key.trim());onDone();}} disabled={!ok} sx={{flex:1,background:"#4285F4",boxShadow:"0 6px 20px rgba(66,133,244,.3)"}}>
             {I(Ic.Check)} Lưu và tiếp tục
           </Btn>
         </div>
 
         <p style={{fontSize:11,color:C.s400,textAlign:"center",lineHeight:1.7}}>
-          🔒 API Key lưu trên máy bạn (localStorage), không gửi đi đâu ngoài Anthropic.<br/>
-          ⚠️ Nút "Kiểm tra" chỉ hoạt động trên HTTPS (GitHub Pages). Nếu dùng file local, bỏ qua bước test, nhập key và nhấn Lưu luôn.
+          🔒 API Key lưu trên trình duyệt của bạn, không gửi đi đâu ngoài Google.<br/>
+          Có thể đổi key bất kỳ lúc nào qua nút 🔑 Đổi API Key ở trang chủ.
         </p>
       </div>
     </div>
