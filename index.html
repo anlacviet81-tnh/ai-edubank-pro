@@ -74,6 +74,12 @@ const DB = {
     if (!res.ok) throw new Error(`Firebase lỗi ${res.status}`);
     return res.json();
   },
+  // Xóa dữ liệu
+  del: async (path) => {
+    const url = getDbUrl();
+    if (!url) return;
+    await fetch(`${url}/${path}.json`, { method: 'DELETE' });
+  },
   // Test kết nối
   test: async (url) => {
     const clean = url.replace(/\/+$/, '');
@@ -93,26 +99,49 @@ const gradeBg    = g  => ({Giỏi:"#ECFDF5",Khá:"#EFF6FF","Trung bình":"#FFFBE
 const TYPE_LABEL = {multiple_choice:"Trắc nghiệm",true_false:"Đúng / Sai",short_answer:"Câu ngắn"};
 
 // ═══════════════════════════════════════════════════════
-// KHO TÀI LIỆU — lưu trong localStorage của máy GV
+// MÃ GIÁO VIÊN — định danh riêng để tách kho tài liệu
 // ═══════════════════════════════════════════════════════
-const LIB_KEY = 'aedu_doclib_v2';
+const getTeacherId = () => {
+  let id = localStorage.getItem('aedu_teacher_id');
+  if (!id) {
+    // Tạo mã ngẫu nhiên 12 ký tự
+    id = Math.random().toString(36).substr(2,6) + Math.random().toString(36).substr(2,6);
+    localStorage.setItem('aedu_teacher_id', id);
+  }
+  return id;
+};
+
+// ═══════════════════════════════════════════════════════
+// KHO TÀI LIỆU — lưu trên Firebase, không giới hạn, dùng mọi máy
+// ═══════════════════════════════════════════════════════
 const DocLib = {
-  getAll: () => {
-    try { return JSON.parse(localStorage.getItem(LIB_KEY)||'[]'); } catch { return []; }
+  // Lấy toàn bộ tài liệu của giáo viên này
+  getAll: async () => {
+    try {
+      const data = await DB.get(`doclib/${getTeacherId()}`);
+      if (!data || typeof data !== 'object') return [];
+      return Object.entries(data)
+        .map(([id, doc]) => ({ ...doc, id }))
+        .filter(Boolean)
+        .sort((a,b) => new Date(b.savedAt) - new Date(a.savedAt));
+    } catch { return []; }
   },
-  save: (name, content, type='txt') => {
-    const all = DocLib.getAll();
-    const id  = Date.now().toString(36);
-    const doc = { id, name: name.trim().slice(0,60), content: content.slice(0,12000), type, savedAt: new Date().toISOString(), size: content.length };
-    // Tối đa 30 tài liệu, nếu vượt thì xóa cũ nhất
-    const updated = [doc, ...all].slice(0, 30);
-    localStorage.setItem(LIB_KEY, JSON.stringify(updated));
-    return updated;
+  // Lưu tài liệu mới
+  save: async (name, content) => {
+    const id  = Date.now().toString(36) + Math.random().toString(36).substr(2,4);
+    const doc = {
+      name:    name.trim().slice(0, 80),
+      content: content.slice(0, 80000), // 80.000 ký tự — ~40 trang sách
+      savedAt: new Date().toISOString(),
+      size:    content.length,
+    };
+    await DB.put(`doclib/${getTeacherId()}/${id}`, doc);
+    return DocLib.getAll();
   },
-  delete: (id) => {
-    const updated = DocLib.getAll().filter(d => d.id !== id);
-    localStorage.setItem(LIB_KEY, JSON.stringify(updated));
-    return updated;
+  // Xóa tài liệu
+  delete: async (id) => {
+    await DB.del(`doclib/${getTeacherId()}/${id}`);
+    return DocLib.getAll();
   },
 };
 
@@ -174,7 +203,7 @@ const clearApiKey = () => localStorage.removeItem('aedu_api_key');
 // AI GENERATION — Google Gemini API (MIỄN PHÍ)
 // Gemini 2.0 Flash: 1500 request/ngày free, đọc PDF scan như AI Studio
 // ═══════════════════════════════════════════════════════
-const GEMINI_MODEL = "gemini-2.0-flash";
+const GEMINI_MODEL = "gemini-1.5-flash-latest";
 const GEMINI_URL   = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
 
 async function generateBank(topic, material, pdfFiles = []) {
@@ -240,10 +269,15 @@ JSON CẤU TRÚC BẮT BUỘC:
 
   if (!res.ok) {
     const e = await res.json().catch(()=>({}));
-    const msg = e?.error?.message || `Lỗi API ${res.status}`;
-    if (res.status === 400) throw new Error('API Key sai hoặc không hợp lệ. Kiểm tra lại key.');
-    if (res.status === 429) throw new Error('Quá giới hạn miễn phí hôm nay (1500 request/ngày). Thử lại vào ngày mai.');
-    throw new Error(msg);
+    const errMsg = e?.error?.message || "";
+    if (res.status === 400) throw new Error('API Key sai hoặc không hợp lệ. Vào trang chủ → 🔑 Đổi API Key.');
+    if (res.status === 429) {
+      if (errMsg.toLowerCase().includes('quota') || errMsg.toLowerCase().includes('exceed')) {
+        throw new Error('Hết quota Gemini hôm nay. Cách khắc phục:\n① Vào aistudio.google.com → tạo API key mới → đổi key trong app\n② Hoặc chờ đến 0:00 ngày mai để quota reset.');
+      }
+      throw new Error('Gemini đang bận (giới hạn tốc độ). Đợi 1–2 phút rồi thử lại.');
+    }
+    throw new Error(errMsg || `Lỗi API ${res.status}`);
   }
 
   const data  = await res.json();
@@ -450,7 +484,7 @@ function ApiKeyScreen({ onDone }) {
           <Btn onClick={test} disabled={!key.trim()||testing} variant="outline" sx={{flex:1}}>
             {testing?<Ic.Spin width={16} height={16} style={{color:C.g600}}/>:I(Ic.Eye)} Kiểm tra kết nối
           </Btn>
-          <Btn onClick={()=>{setApiKey(key.trim());onDone();}} disabled={!ok} sx={{flex:1,background:"#4285F4",boxShadow:"0 6px 20px rgba(66,133,244,.3)"}}>
+          <Btn onClick={()=>{setApiKey(key.trim());onDone();}} disabled={!key.trim()} sx={{flex:1,background:"#4285F4",boxShadow:"0 6px 20px rgba(66,133,244,.3)"}}>
             {I(Ic.Check)} Lưu và tiếp tục
           </Btn>
         </div>
@@ -655,8 +689,9 @@ function HomePage({ onTeacher, onStudent, onSetup, onChangeKey }) {
 function TeacherApp({ onHome }) {
   const [section,   setSection]   = useState("create");
   const [step,      setStep]      = useState("input");
-  const [topic,     setTopic]     = useState("");
-  const [material,  setMaterial]  = useState("");
+  // Khôi phục topic & material từ localStorage khi refresh
+  const [topic,     setTopic]     = useState(() => localStorage.getItem('aedu_draft_topic') || "");
+  const [material,  setMaterial]  = useState(() => localStorage.getItem('aedu_draft_material') || "");
   const [matrix,    setMatrix]    = useState([]);
   const [questions, setQuestions] = useState([]);
   const [tab,       setTab]       = useState("matrix");
@@ -666,10 +701,22 @@ function TeacherApp({ onHome }) {
   const [justCopied,setJustCopied]= useState("");
   const [fileLoading,setFileLoading]=useState(false);
   const [fileErr,   setFileErr]   = useState("");
-  const [pdfFiles,  setPdfFiles]  = useState([]); // [{name, base64, size}] — PDF gửi thẳng vào Claude
-  const [library,   setLibrary]   = useState(DocLib.getAll());
-  const [docName,   setDocName]   = useState("");
+  const [pdfFiles,  setPdfFiles]  = useState([]); // PDF chỉ lưu trong RAM (quá lớn để localStorage)
+  const [library,   setLibrary]   = useState([]);
+  const [libLoading,setLibLoading]= useState(false);
+  const [docName,   setDocName]   = useState(() => localStorage.getItem('aedu_draft_docname') || "");
   const fileRef = useRef(null);
+
+  // Tải kho tài liệu từ Firebase khi vào trang
+  useEffect(() => {
+    setLibLoading(true);
+    DocLib.getAll().then(docs => { setLibrary(docs); setLibLoading(false); }).catch(()=>setLibLoading(false));
+  }, []);
+
+  // Tự động lưu topic, material, docName vào localStorage khi thay đổi
+  useEffect(() => { localStorage.setItem('aedu_draft_topic',    topic);    }, [topic]);
+  useEffect(() => { localStorage.setItem('aedu_draft_material', material); }, [material]);
+  useEffect(() => { localStorage.setItem('aedu_draft_docname',  docName);  }, [docName]);
 
   const MSGS = ["Đang phân tích tài liệu tham khảo...","Đang xây dựng ma trận phân hóa A-B-C...","Đang soạn câu hỏi theo thang Bloom...","Đang kiểm tra tính sư phạm...","Sắp hoàn tất, vui lòng chờ thêm..."];
 
@@ -725,12 +772,15 @@ function TeacherApp({ onHome }) {
     setPdfFiles(prev => prev.filter(p => p.name !== name));
   };
 
-  const handleSaveToLib = () => {
-    if (!material.trim()) return;
+  const handleSaveToLib = async () => {
+    if (!material.trim() && !pdfFiles.length) return;
     const name = docName.trim() || topic.trim() || `Tài liệu ${new Date().toLocaleDateString('vi-VN')}`;
-    const updated = DocLib.save(name, material);
-    setLibrary(updated);
-    setDocName(name);
+    const content = material.trim() || `[PDF: ${pdfFiles.map(p=>p.name).join(', ')}]`;
+    try {
+      const updated = await DocLib.save(name, content);
+      setLibrary(updated);
+      setDocName(name);
+    } catch(e) { alert('Lỗi lưu tài liệu: ' + e.message); }
   };
 
   const handleSelectFromLib = (doc) => {
@@ -739,9 +789,11 @@ function TeacherApp({ onHome }) {
     setFileErr("");
   };
 
-  const handleDeleteFromLib = (id) => {
-    const updated = DocLib.delete(id);
-    setLibrary(updated);
+  const handleDeleteFromLib = async (id) => {
+    try {
+      const updated = await DocLib.delete(id);
+      setLibrary(updated);
+    } catch(e) { alert('Lỗi xóa tài liệu: ' + e.message); }
   };
 
   const handleShare = async lv => {
@@ -779,7 +831,7 @@ function TeacherApp({ onHome }) {
         </div>
       </header>
       <main style={{maxWidth:920,margin:"0 auto",padding:"36px 18px 70px"}}>
-        {section==="create"&&step==="input"   && <InputStep {...{topic,setTopic,material,setMaterial,onGenerate:handleGenerate,fileRef,onFile:handleFile,err,fileLoading,fileErr,setFileErr,pdfFiles,onRemovePdf:handleRemovePdf,library,docName,setDocName,onSaveToLib:handleSaveToLib,onSelectFromLib:handleSelectFromLib,onDeleteFromLib:handleDeleteFromLib}}/>}
+        {section==="create"&&step==="input"   && <InputStep {...{topic,setTopic,material,setMaterial,onGenerate:handleGenerate,fileRef,onFile:handleFile,err,fileLoading,fileErr,setFileErr,pdfFiles,onRemovePdf:handleRemovePdf,library,libLoading,docName,setDocName,onSaveToLib:handleSaveToLib,onSelectFromLib:handleSelectFromLib,onDeleteFromLib:handleDeleteFromLib}}/>}
         {section==="create"&&step==="loading" && <LoadingStep msg={loadMsg}/>}
         {section==="create"&&step==="result"  && <ResultStep {...{matrix,questions,tab,setTab,onShare:handleShare,codes,justCopied,onDownload:downloadCSV,topic}}/>}
         {section==="results" && <ResultsSection/>}
@@ -788,7 +840,7 @@ function TeacherApp({ onHome }) {
   );
 }
 
-function InputStep({ topic,setTopic,material,setMaterial,onGenerate,fileRef,onFile,err,fileLoading,fileErr,setFileErr,pdfFiles,onRemovePdf,library,docName,setDocName,onSaveToLib,onSelectFromLib,onDeleteFromLib }) {
+function InputStep({ topic,setTopic,material,setMaterial,onGenerate,fileRef,onFile,err,fileLoading,fileErr,setFileErr,pdfFiles,onRemovePdf,library,libLoading,docName,setDocName,onSaveToLib,onSelectFromLib,onDeleteFromLib }) {
   const [showLib, setShowLib] = useState(false);
   const [saveMsg, setSaveMsg] = useState("");
 
@@ -863,6 +915,14 @@ function InputStep({ topic,setTopic,material,setMaterial,onGenerate,fileRef,onFi
             </div>
           )}
 
+          {/* Thông báo: PDF cần tải lại sau refresh */}
+          {pdfFiles.length === 0 && docName && (
+            <div style={{padding:"8px 12px",background:"#FFFBEB",border:`1px solid ${C.a100}`,borderRadius:9,marginBottom:8,fontSize:12,color:C.a600,display:"flex",gap:7,alignItems:"center"}}>
+              <span>⚠️</span>
+              <span>File PDF "<strong>{docName}</strong>" cần tải lại sau khi refresh trang (trình duyệt không lưu file upload). Tên bài học và nội dung text vẫn còn.</span>
+            </div>
+          )}
+
           {/* Danh sách PDF đã tải — hiển thị badge, xóa được */}
           {pdfFiles.length > 0 && (
             <div style={{marginBottom:10}}>
@@ -871,13 +931,13 @@ function InputStep({ topic,setTopic,material,setMaterial,onGenerate,fileRef,onFi
                   <span style={{fontSize:17,flexShrink:0}}>📄</span>
                   <div style={{flex:1,minWidth:0}}>
                     <div style={{fontSize:13,fontWeight:700,color:C.b700,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{f.name}</div>
-                    <div style={{fontSize:10,color:C.b600,marginTop:1}}>PDF · {f.sizeMB}MB · ⭐ Gửi thẳng vào Claude — đọc chính xác như AI Studio</div>
+                    <div style={{fontSize:10,color:C.b600,marginTop:1}}>PDF · {f.sizeMB}MB · ✨ Gửi thẳng vào Gemini — đọc chính xác như AI Studio</div>
                   </div>
                   <button onClick={()=>onRemovePdf(f.name)} style={{background:"none",border:"none",cursor:"pointer",color:C.s400,fontSize:17,lineHeight:1,flexShrink:0,padding:"0 4px"}}>×</button>
                 </div>
               ))}
               <div style={{fontSize:11,color:C.g700,background:C.g50,padding:"6px 12px",borderRadius:8,border:`1px solid ${C.g100}`}}>
-                ✅ Claude sẽ đọc toàn bộ {pdfFiles.length} file PDF kể trên, kể cả bản scan — không cần trích xuất chữ trước
+                ✅ Gemini sẽ đọc toàn bộ {pdfFiles.length} file PDF kể trên, kể cả bản scan — không cần trích xuất chữ trước
               </div>
             </div>
           )}
@@ -885,34 +945,57 @@ function InputStep({ topic,setTopic,material,setMaterial,onGenerate,fileRef,onFi
           {/* Kho tài liệu panel */}
           {showLib && (
             <div style={{background:C.s50,border:`1.5px solid ${C.g100}`,borderRadius:16,marginBottom:12,overflow:"hidden"}}>
-              <div style={{padding:"12px 16px",background:C.g50,borderBottom:`1px solid ${C.g100}`,display:"flex",alignItems:"center",justifyContent:"space-between"}}>
-                <div style={{fontSize:12,fontWeight:900,color:C.g700}}>📚 Kho tài liệu ({library.length}/30)</div>
-                <button onClick={()=>setShowLib(false)} style={{background:"none",border:"none",cursor:"pointer",color:C.s400,fontSize:18,lineHeight:1}}>×</button>
-              </div>
-              {library.length===0
-                ? <div style={{padding:"24px 16px",textAlign:"center",color:C.s400,fontSize:13}}>Chưa có tài liệu nào được lưu.<br/><span style={{fontSize:12}}>Tải file lên và nhấn "Lưu vào kho" để bắt đầu.</span></div>
-                : <div style={{maxHeight:260,overflowY:"auto"}}>
-                    {library.map(doc=>(
-                      <div key={doc.id} style={{display:"flex",alignItems:"center",gap:10,padding:"11px 16px",borderBottom:`1px solid ${C.s100}`,background:"white"}}>
-                        <div style={{fontSize:18,flexShrink:0}}>{doc.type==='pdf'?'📄':doc.type==='docx'?'📝':'📃'}</div>
-                        <div style={{flex:1,minWidth:0}}>
-                          <div style={{fontSize:13,fontWeight:700,color:C.s900,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{doc.name}</div>
-                          <div style={{fontSize:10,color:C.s400,marginTop:2}}>{fmtDate(doc.savedAt)} · {fmtSize(doc.size)}</div>
-                        </div>
-                        <div style={{display:"flex",gap:6,flexShrink:0}}>
-                          <button onClick={()=>{onSelectFromLib(doc);setShowLib(false);}}
-                            style={{padding:"5px 11px",background:C.g600,color:"white",borderRadius:7,border:"none",cursor:"pointer",fontSize:11,fontWeight:900}}>
-                            Dùng
-                          </button>
-                          <button onClick={()=>onDeleteFromLib(doc.id)}
-                            style={{padding:"5px 8px",background:C.r50,color:C.r600,borderRadius:7,border:`1px solid ${C.r100}`,cursor:"pointer",fontSize:11,fontWeight:900}}>
-                            {I(Ic.X,11)}
-                          </button>
-                        </div>
-                      </div>
-                    ))}
+              <div style={{padding:"12px 16px",background:C.g50,borderBottom:`1px solid ${C.g100}`,display:"flex",alignItems:"center",justifyContent:"space-between",gap:10,flexWrap:"wrap"}}>
+                <div style={{display:"flex",alignItems:"center",gap:8}}>
+                  <div style={{fontSize:13,fontWeight:900,color:C.g700}}>
+                    ☁️ Kho tài liệu {!libLoading && `(${library.length} tài liệu)`}
                   </div>
+                  <span style={{fontSize:9,fontWeight:800,color:"white",background:C.g600,padding:"2px 7px",borderRadius:99,textTransform:"uppercase"}}>Firebase</span>
+                </div>
+                <div style={{display:"flex",alignItems:"center",gap:8}}>
+                  <span style={{fontSize:10,color:C.s400}}>Mã kho: <strong style={{fontFamily:"monospace",color:C.s700}}>{getTeacherId()}</strong></span>
+                  <button onClick={()=>setShowLib(false)} style={{background:"none",border:"none",cursor:"pointer",color:C.s400,fontSize:18,lineHeight:1}}>×</button>
+                </div>
+              </div>
+              {libLoading
+                ? <div style={{padding:"20px 16px",textAlign:"center",display:"flex",alignItems:"center",justifyContent:"center",gap:8,color:C.s400,fontSize:13}}>
+                    <Ic.Spin width={16} height={16} style={{color:C.g600}}/> Đang tải từ Firebase...
+                  </div>
+                : library.length===0
+                  ? <div style={{padding:"24px 16px",textAlign:"center",color:C.s400,fontSize:13}}>
+                      Chưa có tài liệu nào.<br/>
+                      <span style={{fontSize:12}}>Tải file lên rồi nhấn "💾 Lưu vào kho" để bắt đầu.</span>
+                    </div>
+                  : <div style={{maxHeight:280,overflowY:"auto"}}>
+                      {library.map(doc=>(
+                        <div key={doc.id} style={{display:"flex",alignItems:"center",gap:10,padding:"11px 16px",borderBottom:`1px solid ${C.s100}`,background:"white"}}>
+                          <div style={{fontSize:18,flexShrink:0}}>📄</div>
+                          <div style={{flex:1,minWidth:0}}>
+                            <div style={{fontSize:13,fontWeight:700,color:C.s900,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{doc.name}</div>
+                            <div style={{fontSize:10,color:C.s400,marginTop:2}}>
+                              {new Date(doc.savedAt).toLocaleDateString('vi-VN')} · {doc.size>=1000?`${(doc.size/1000).toFixed(0)}K`:`${doc.size}`} ký tự
+                            </div>
+                          </div>
+                          <div style={{display:"flex",gap:6,flexShrink:0}}>
+                            <button onClick={()=>{onSelectFromLib(doc);setShowLib(false);}}
+                              style={{padding:"5px 11px",background:C.g600,color:"white",borderRadius:7,border:"none",cursor:"pointer",fontSize:11,fontWeight:900}}>
+                              Dùng
+                            </button>
+                            <button onClick={()=>onDeleteFromLib(doc.id)}
+                              style={{padding:"5px 8px",background:C.r50,color:C.r600,borderRadius:7,border:`1px solid ${C.r100}`,cursor:"pointer",fontSize:11,fontWeight:900}}>
+                              {I(Ic.X,11)}
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
               }
+              <div style={{padding:"8px 14px",borderTop:`1px solid ${C.s100}`,background:"white"}}>
+                <p style={{fontSize:10,color:C.s400,margin:0,lineHeight:1.6}}>
+                  ☁️ Lưu trên Firebase — không mất khi xóa cache, dùng được mọi máy (cùng mã kho).<br/>
+                  Mỗi tài liệu tối đa 80.000 ký tự (~40 trang). Số lượng không giới hạn.
+                </p>
+              </div>
             </div>
           )}
 
