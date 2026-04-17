@@ -381,6 +381,9 @@ function ApiKeyScreen({ onDone }) {
       );
       if (res.ok) {
         setMsg("✅ API Key hợp lệ! Kết nối Gemini thành công."); setOk(true);
+      } else if (res.status === 429) {
+        // 429 = rate limit = key đúng, chỉ bị giới hạn tốc độ tạm thời
+        setMsg("✅ API Key hợp lệ! (Lỗi 429 chỉ là giới hạn tốc độ, không ảnh hưởng khi dùng thật)"); setOk(true);
       } else if (res.status === 400) {
         setMsg("❌ API Key sai. Kiểm tra lại trên aistudio.google.com");
       } else if (res.status === 403) {
