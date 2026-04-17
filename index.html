@@ -1,0 +1,1499 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AI EduBank Pro — Học liệu phân hóa thông minh</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: 'Segoe UI', system-ui, -apple-system, sans-serif; background: #FAFAFA; color: #111827; }
+  ::-webkit-scrollbar { width: 6px; } ::-webkit-scrollbar-track { background: #f1f1f1; } ::-webkit-scrollbar-thumb { background: #D1D5DB; border-radius: 3px; }
+  button, input, textarea, select { font-family: inherit; }
+  .fade-in { animation: fadeIn 0.3s ease; }
+  @keyframes fadeIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+  @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+  .spinner { animation: spin 0.8s linear infinite; display: inline-block; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
+<!-- Mammoth.js để đọc file Word (.docx) -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.6.0/mammoth.browser.min.js"></script>
+
+<script type="text/babel">
+const { useState, useEffect, useRef, useCallback } = React;
+
+// ═══════════════════════════════════════════════════════
+// CONFIG — Firebase Database URL
+// ═══════════════════════════════════════════════════════
+// Lấy từ localStorage (giáo viên nhập lần đầu qua màn Setup)
+const getDbUrl = () => {
+  const u = localStorage.getItem('aedu_firebase_url') || '';
+  return u.replace(/\/+$/, ''); // bỏ dấu / cuối nếu có
+};
+const setDbUrl = (u) => localStorage.setItem('aedu_firebase_url', u.replace(/\/+$/, ''));
+const clearDbUrl = () => localStorage.removeItem('aedu_firebase_url');
+
+// ═══════════════════════════════════════════════════════
+// FIREBASE REST API STORAGE
+// ═══════════════════════════════════════════════════════
+const DB = {
+  // Ghi dữ liệu
+  put: async (path, data) => {
+    const url = getDbUrl();
+    if (!url) throw new Error('Chưa cấu hình Firebase.');
+    const res = await fetch(`${url}/${path}.json`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data)
+    });
+    if (!res.ok) throw new Error(`Firebase lỗi ${res.status}`);
+    return res.json();
+  },
+  // Đọc dữ liệu
+  get: async (path) => {
+    const url = getDbUrl();
+    if (!url) return null;
+    const res = await fetch(`${url}/${path}.json`);
+    if (!res.ok) return null;
+    return res.json();
+  },
+  // Thêm dữ liệu (tạo key tự động)
+  post: async (path, data) => {
+    const url = getDbUrl();
+    if (!url) throw new Error('Chưa cấu hình Firebase.');
+    const res = await fetch(`${url}/${path}.json`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data)
+    });
+    if (!res.ok) throw new Error(`Firebase lỗi ${res.status}`);
+    return res.json();
+  },
+  // Test kết nối
+  test: async (url) => {
+    const clean = url.replace(/\/+$/, '');
+    const res = await fetch(`${clean}/ping.json`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ok: true, ts: Date.now() })
+    });
+    return res.ok;
+  }
+};
+
+const genCode    = () => Math.random().toString(36).substring(2,8).toUpperCase();
+const getGrade   = p  => p>=85?"Giỏi":p>=65?"Khá":p>=50?"Trung bình":"Yếu";
+const gradeColor = g  => ({Giỏi:"#059669",Khá:"#2563EB","Trung bình":"#D97706",Yếu:"#DC2626"})[g]||"#6B7280";
+const gradeBg    = g  => ({Giỏi:"#ECFDF5",Khá:"#EFF6FF","Trung bình":"#FFFBEB",Yếu:"#FEF2F2"})[g]||"#F9FAFB";
+const TYPE_LABEL = {multiple_choice:"Trắc nghiệm",true_false:"Đúng / Sai",short_answer:"Câu ngắn"};
+
+// ═══════════════════════════════════════════════════════
+// KHO TÀI LIỆU — lưu trong localStorage của máy GV
+// ═══════════════════════════════════════════════════════
+const LIB_KEY = 'aedu_doclib_v2';
+const DocLib = {
+  getAll: () => {
+    try { return JSON.parse(localStorage.getItem(LIB_KEY)||'[]'); } catch { return []; }
+  },
+  save: (name, content, type='txt') => {
+    const all = DocLib.getAll();
+    const id  = Date.now().toString(36);
+    const doc = { id, name: name.trim().slice(0,60), content: content.slice(0,12000), type, savedAt: new Date().toISOString(), size: content.length };
+    // Tối đa 30 tài liệu, nếu vượt thì xóa cũ nhất
+    const updated = [doc, ...all].slice(0, 30);
+    localStorage.setItem(LIB_KEY, JSON.stringify(updated));
+    return updated;
+  },
+  delete: (id) => {
+    const updated = DocLib.getAll().filter(d => d.id !== id);
+    localStorage.setItem(LIB_KEY, JSON.stringify(updated));
+    return updated;
+  },
+};
+
+// ═══════════════════════════════════════════════════════
+// ĐỌC FILE — PDF gửi thẳng vào Claude, DOCX/TXT trích văn bản
+// ═══════════════════════════════════════════════════════
+
+// Đọc file thành base64 (dùng cho PDF)
+function fileToBase64(file) {
+  return new Promise((res, rej) => {
+    const r = new FileReader();
+    r.onload  = e => res(e.target.result.split(',')[1]); // bỏ "data:...;base64," ở đầu
+    r.onerror = () => rej(new Error('Không đọc được file.'));
+    r.readAsDataURL(file);
+  });
+}
+
+// Đọc file DOCX/TXT thành văn bản thuần
+async function extractTextFile(file) {
+  const name = file.name.toLowerCase();
+  // TXT
+  if (file.type === 'text/plain' || name.endsWith('.txt')) {
+    return await new Promise((res, rej) => {
+      const r = new FileReader();
+      r.onload  = e => res(e.target.result);
+      r.onerror = () => rej(new Error('Không đọc được file TXT.'));
+      r.readAsText(file, 'utf-8');
+    });
+  }
+  // DOCX
+  if (name.endsWith('.docx') || name.endsWith('.doc') || file.type.includes('wordprocessingml') || file.type.includes('msword')) {
+    if (typeof mammoth === 'undefined') throw new Error('Thư viện đọc Word chưa tải. Kiểm tra mạng rồi thử lại.');
+    const buf    = await file.arrayBuffer();
+    const result = await mammoth.extractRawText({ arrayBuffer: buf });
+    if (!result.value?.trim()) throw new Error('File Word không có nội dung. Thử mở và lưu lại bằng Word 2007 trở lên (.docx).');
+    return result.value.trim();
+  }
+  const ext = name.split('.').pop().toUpperCase();
+  throw new Error(`Định dạng .${ext} chưa được hỗ trợ. Dùng PDF, Word (.docx), hoặc TXT.`);
+}
+
+const saveQuiz = (code, data) => DB.put(`quizzes/${code.toUpperCase()}`, data);
+const loadQuiz = (code) => DB.get(`quizzes/${code.toUpperCase()}`);
+const saveResult = (code, result) => DB.post(`results/${code.toUpperCase()}`, result);
+const loadResults = async (code) => {
+  const data = await DB.get(`results/${code.toUpperCase()}`);
+  if (!data || typeof data !== 'object') return [];
+  return Object.values(data).filter(Boolean).sort((a,b)=>new Date(b.submittedAt)-new Date(a.submittedAt));
+};
+
+// ═══════════════════════════════════════════════════════
+// API KEY — lưu trong localStorage máy GV
+// ═══════════════════════════════════════════════════════
+const getApiKey  = () => localStorage.getItem('aedu_api_key') || '';
+const setApiKey  = (k) => localStorage.setItem('aedu_api_key', k.trim());
+const clearApiKey = () => localStorage.removeItem('aedu_api_key');
+
+// ═══════════════════════════════════════════════════════
+// AI GENERATION — Claude API (PDF gửi thẳng, không qua OCR)
+// ═══════════════════════════════════════════════════════
+const API_URL = "https://api.anthropic.com/v1/messages";
+const MODEL   = "claude-sonnet-4-20250514";
+
+async function generateBank(topic, material, pdfFiles = []) {
+  // Câu lệnh yêu cầu AI
+  const instruction = `Bạn là chuyên gia sư phạm Việt Nam chuyên thiết kế đề kiểm tra theo thang Bloom.
+
+Chủ đề: "${topic}"
+${material.trim() ? `Tài liệu bổ sung:\n"""\n${material}\n"""` : ''}
+${pdfFiles.length > 0 ? `(Đã đính kèm ${pdfFiles.length} file tài liệu bên trên — hãy đọc kỹ nội dung trước khi ra đề.)` : 'Sử dụng kiến thức chuẩn chương trình phổ thông Việt Nam.'}
+
+NHIỆM VỤ: Dựa vào tài liệu được cung cấp, tạo ngân hàng câu hỏi phân hóa 3 mức A/B/C về chủ đề "${topic}".
+
+LUẬT NGHIÊM NGẶT:
+1. Chỉ trả về JSON thuần túy. TUYỆT ĐỐI không markdown, không giải thích trước/sau.
+2. JSON phải hợp lệ 100%.
+3. Tạo đúng 15 câu: 5 mức A + 5 mức B + 5 mức C.
+4. Mỗi mức: ít nhất 2 trắc nghiệm, 1 đúng/sai, 1 câu ngắn.
+5. Tất cả nội dung bằng tiếng Việt, bám sát nội dung tài liệu đính kèm.
+
+JSON CẤU TRÚC BẮT BUỘC:
+{
+  "matrix": [
+    {"level":"A","title":"Biết","description":"Mô tả.","requirements":"Yêu cầu cần đạt."},
+    {"level":"B","title":"Hiểu","description":"Mô tả.","requirements":"Yêu cầu cần đạt."},
+    {"level":"C","title":"Vận dụng","description":"Mô tả.","requirements":"Yêu cầu cần đạt."}
+  ],
+  "questions": [
+    {"id":"1","code":"MA-A01","type":"multiple_choice","level":"A",
+     "content":"Câu hỏi?","options":["A. ...","B. ...","C. ...","D. ..."],
+     "answer":"B","explanation":"Giải thích.","commonErrors":"Lỗi thường gặp."},
+    {"id":"2","code":"MA-A02","type":"true_false","level":"A",
+     "content":"Ngữ cảnh:","options":[],
+     "subQuestions":[{"id":"a","content":"Nhận định a.","answer":"true"},{"id":"b","content":"Nhận định b.","answer":"false"},{"id":"c","content":"Nhận định c.","answer":"true"},{"id":"d","content":"Nhận định d.","answer":"false"}],
+     "answer":"","explanation":"Giải thích.","commonErrors":"Lỗi thường gặp."},
+    {"id":"3","code":"MA-C01","type":"short_answer","level":"C",
+     "content":"Câu hỏi?","options":[],"subQuestions":[],
+     "answer":"Đáp án mẫu.","explanation":"Giải thích.","commonErrors":"Lỗi thường gặp."}
+  ]
+}`;
+
+  // Xây dựng content: đính kèm PDF trực tiếp + câu lệnh
+  const contentParts = [
+    // Các file PDF đính kèm trực tiếp — Claude đọc như AI Studio
+    ...pdfFiles.map(f => ({
+      type: "document",
+      source: { type: "base64", media_type: "application/pdf", data: f.base64 },
+      title: f.name,
+    })),
+    // Câu lệnh văn bản
+    { type: "text", text: instruction }
+  ];
+
+  const apiKey = getApiKey();
+  if (!apiKey) throw new Error('Chưa có API Key. Vào Cài đặt → nhập Anthropic API Key.');
+
+  const res = await fetch(API_URL, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-api-key": apiKey,
+      "anthropic-version": "2023-06-01",
+      "anthropic-dangerous-direct-browser-access": "true",
+    },
+    body: JSON.stringify({
+      model: MODEL,
+      max_tokens: 4096,
+      messages: [{ role: "user", content: contentParts }]
+    })
+  });
+  if (!res.ok) {
+    const e = await res.json().catch(()=>({}));
+    throw new Error(e?.error?.message || `Lỗi API ${res.status}`);
+  }
+  const data  = await res.json();
+  const raw   = data.content?.find(b=>b.type==="text")?.text || "";
+  const clean = raw.replace(/```json\s*/g,"").replace(/```\s*/g,"").trim();
+  try { return JSON.parse(clean); }
+  catch {
+    const m = clean.match(/\{[\s\S]*\}/);
+    if (m) return JSON.parse(m[0]);
+    throw new Error("AI trả dữ liệu không hợp lệ. Thêm tài liệu chi tiết hơn và thử lại.");
+  }
+}
+
+// ═══════════════════════════════════════════════════════
+// COLORS
+// ═══════════════════════════════════════════════════════
+const C = {
+  g50:"#ECFDF5",g100:"#D1FAE5",g200:"#A7F3D0",g600:"#059669",g700:"#047857",g800:"#065F46",
+  b50:"#EFF6FF",b100:"#DBEAFE",b600:"#2563EB",b700:"#1D4ED8",
+  a50:"#FFFBEB",a100:"#FEF3C7",a600:"#D97706",
+  p50:"#F5F3FF",p100:"#EDE9FE",p600:"#7C3AED",
+  r50:"#FEF2F2",r100:"#FEE2E2",r600:"#DC2626",
+  w:"#FFFFFF",s50:"#F9FAFB",s100:"#F3F4F6",s200:"#E5E7EB",
+  s300:"#D1D5DB",s400:"#9CA3AF",s500:"#6B7280",s600:"#4B5563",s700:"#374151",s900:"#111827",
+};
+const LVL_C = {A:C.b600,B:C.g600,C:C.a600};
+const LVL_BG= {A:C.b50, B:C.g50, C:C.a50};
+
+// ═══════════════════════════════════════════════════════
+// ICONS
+// ═══════════════════════════════════════════════════════
+const Ic = {
+  Logo:   p=><svg {...p} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 14l9-5-9-5-9 5 9 5z"/><path d="M12 14l6.16-3.422a12 12 0 01.665 6.48A12 12 0 0112 20.055a12 12 0 01-6.824-2.998 12 12 0 01.665-6.479L12 14z"/></svg>,
+  Book:   p=><svg {...p} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253"/></svg>,
+  Arrow:  p=><svg {...p} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M14 5l7 7m0 0l-7 7m7-7H3"/></svg>,
+  Check:  p=><svg {...p} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3"><polyline points="20 6 9 17 4 12"/></svg>,
+  X:      p=><svg {...p} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>,
+  Copy:   p=><svg {...p} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>,
+  Down:   p=><svg {...p} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/></svg>,
+  Spin:   p=><svg {...p} className="spinner" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M4 4v5h.582m15.356 2A8 8 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8 8 0 01-15.357-2m15.357 2H15"/></svg>,
+  Upload: p=><svg {...p} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"/></svg>,
+  Eye:    p=><svg {...p} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>,
+  Layers: p=><svg {...p} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg>,
+  File:   p=><svg {...p} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>,
+  Table:  p=><svg {...p} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M3 10h18M3 14h18m-9-4v8m-7 0h14a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z"/></svg>,
+  Filter: p=><svg {...p} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/></svg>,
+  Home:   p=><svg {...p} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M3 9l9-7 9 7v11a2 2 0 01-2 2H5a2 2 0 01-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>,
+  Users:  p=><svg {...p} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87M16 3.13a4 4 0 010 7.75"/></svg>,
+  Play:   p=><svg {...p} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10"/><polygon points="10 8 16 12 10 16 10 8" fill="currentColor"/></svg>,
+  Redo:   p=><svg {...p} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 102.13-9.36L1 10"/></svg>,
+  Cog:    p=><svg {...p} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-2 2 2 2 0 01-2-2v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83 0 2 2 0 010-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 01-2-2 2 2 0 012-2h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 010-2.83 2 2 0 012.83 0l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 012-2 2 2 0 012 2v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 0 2 2 0 010 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 012 2 2 2 0 01-2 2h-.09a1.65 1.65 0 00-1.51 1z"/></svg>,
+  Db:     p=><svg {...p} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>,
+};
+const I = (Svg,sz=16) => <Svg width={sz} height={sz} style={{flexShrink:0}}/>;
+
+// ═══════════════════════════════════════════════════════
+// SHARED UI COMPONENTS
+// ═══════════════════════════════════════════════════════
+function Logo({ onClick }) {
+  return (
+    <div onClick={onClick} style={{display:"flex",alignItems:"center",gap:10,cursor:onClick?"pointer":"default",userSelect:"none"}}>
+      <div style={{width:38,height:38,background:`linear-gradient(135deg,${C.g600},${C.g700})`,borderRadius:11,display:"flex",alignItems:"center",justifyContent:"center",boxShadow:`0 4px 14px ${C.g600}45`,flexShrink:0,color:"white"}}>
+        {I(Ic.Logo,21)}
+      </div>
+      <div>
+        <div style={{fontSize:15,fontWeight:900,color:C.s900,lineHeight:1.1}}>AI EduBank Pro</div>
+        <div style={{fontSize:8,fontWeight:700,color:C.g600,letterSpacing:"0.14em",textTransform:"uppercase"}}>Học liệu phân hóa thông minh</div>
+      </div>
+    </div>
+  );
+}
+
+function Btn({ children, onClick, disabled, variant="green", sx={} }) {
+  const V = {
+    green:  {bg:C.g600, hov:C.g700, txt:"white", sh:`0 6px 20px ${C.g600}30`},
+    dark:   {bg:C.s900, hov:C.s700, txt:"white", sh:"none"},
+    ghost:  {bg:C.w,    hov:C.s100, txt:C.s700,  sh:"0 1px 4px rgba(0,0,0,.08)", bdr:`1px solid ${C.s200}`},
+    blue:   {bg:C.b600, hov:C.b700, txt:"white", sh:`0 6px 20px ${C.b600}30`},
+    outline:{bg:"transparent",hov:C.g50,txt:C.g600,sh:"none",bdr:`1.5px solid ${C.g200}`},
+    red:    {bg:C.r600, hov:"#b91c1c",txt:"white",sh:"none"},
+  };
+  const v = V[variant]||V.green;
+  const [hov,setHov]=useState(false);
+  return (
+    <button onClick={onClick} disabled={disabled}
+      onMouseEnter={()=>setHov(true)} onMouseLeave={()=>setHov(false)}
+      style={{display:"flex",alignItems:"center",justifyContent:"center",gap:7,padding:"11px 20px",borderRadius:13,border:v.bdr||"none",cursor:disabled?"not-allowed":"pointer",fontWeight:800,fontSize:14,transition:"all 0.15s",
+        background:disabled?C.s200:(hov?v.hov:v.bg),color:disabled?C.s400:v.txt,boxShadow:disabled?"none":v.sh,...sx}}>
+      {children}
+    </button>
+  );
+}
+
+function TabBar({ tabs, value, onChange }) {
+  return (
+    <div style={{display:"flex",background:C.s100,padding:3,borderRadius:12,gap:2,flexWrap:"wrap"}}>
+      {tabs.map(([id,label,Svg])=>(
+        <button key={id} onClick={()=>onChange(id)}
+          style={{display:"flex",alignItems:"center",gap:5,padding:"7px 14px",borderRadius:9,border:"none",fontSize:12,fontWeight:700,cursor:"pointer",transition:"all 0.15s",
+            background:value===id?C.w:"transparent",color:value===id?C.g600:C.s400,
+            boxShadow:value===id?"0 1px 4px rgba(0,0,0,.10)":"none"}}>
+          {Svg && I(Svg,13)}{label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function Badge({ level }) {
+  const clr={A:C.b600,B:C.g600,C:C.a600}[level]||C.s500;
+  return <span style={{padding:"2px 9px",background:clr,color:"white",borderRadius:99,fontSize:9,fontWeight:900,textTransform:"uppercase",letterSpacing:"0.06em",flexShrink:0}}>Mức {level}</span>;
+}
+
+// ═══════════════════════════════════════════════════════
+// API KEY SCREEN — nhập Anthropic API Key lần đầu
+// ═══════════════════════════════════════════════════════
+function ApiKeyScreen({ onDone }) {
+  const [key,     setKey]     = useState("");
+  const [testing, setTesting] = useState(false);
+  const [msg,     setMsg]     = useState("");
+  const [ok,      setOk]      = useState(false);
+
+  const test = async () => {
+    const k = key.trim();
+    if (!k.startsWith("sk-ant-")) {
+      setMsg("❌ API Key không đúng. Phải bắt đầu bằng  sk-ant-..."); return;
+    }
+    setTesting(true); setMsg("Đang kiểm tra...");
+    try {
+      const res = await fetch(API_URL, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-api-key": k,
+          "anthropic-version": "2023-06-01",
+          "anthropic-dangerous-direct-browser-access": "true",
+        },
+        body: JSON.stringify({ model: MODEL, max_tokens: 5, messages: [{ role:"user", content:"Hi" }] })
+      });
+      if (res.ok || res.status === 400) {
+        setMsg("✅ API Key hợp lệ! Kết nối thành công."); setOk(true);
+      } else if (res.status === 401) {
+        setMsg("❌ API Key sai hoặc hết hạn. Kiểm tra lại.");
+      } else {
+        setMsg(`❌ Lỗi ${res.status}. Thử lại sau vài giây.`);
+      }
+    } catch(e) {
+      setMsg("❌ Không kết nối được. Cần mở file từ HTTPS (GitHub Pages) — không dùng được ở file:// local.");
+    } finally { setTesting(false); }
+  };
+
+  return (
+    <div style={{minHeight:"100vh",background:"#FBFBFB",display:"flex",alignItems:"center",justifyContent:"center",padding:20}}>
+      <div className="fade-in" style={{width:"100%",maxWidth:560,background:"white",borderRadius:26,padding:36,boxShadow:"0 20px 60px rgba(0,0,0,.09)",border:`1px solid ${C.s100}`}}>
+        <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:28}}>
+          <div style={{width:48,height:48,background:`linear-gradient(135deg,${C.g600},${C.g700})`,borderRadius:13,display:"flex",alignItems:"center",justifyContent:"center",fontSize:22,boxShadow:`0 6px 20px ${C.g600}30`}}>🔑</div>
+          <div>
+            <h2 style={{fontSize:20,fontWeight:900,color:C.s900,lineHeight:1.2}}>Nhập Anthropic API Key</h2>
+            <p style={{fontSize:13,color:C.s400,marginTop:3}}>Cần để app gọi Claude AI — thiết lập 1 lần duy nhất</p>
+          </div>
+        </div>
+
+        <div style={{background:C.g50,border:`1px solid ${C.g100}`,borderRadius:16,padding:"18px 20px",marginBottom:24}}>
+          <div style={{fontSize:12,fontWeight:900,color:C.g700,textTransform:"uppercase",letterSpacing:"0.1em",marginBottom:12}}>Cách lấy API Key (5 phút)</div>
+          {[
+            ["1","Vào: console.anthropic.com → đăng nhập bằng Google/Email"],
+            ["2","Nhấn \"API Keys\" ở menu trái → nhấn \"Create Key\""],
+            ["3","Đặt tên bất kỳ (VD: EduBank) → nhấn \"Create Key\""],
+            ["4","Copy key bắt đầu bằng sk-ant-... → dán vào ô bên dưới"],
+          ].map(([n,t])=>(
+            <div key={n} style={{display:"flex",gap:10,marginBottom:9,alignItems:"flex-start"}}>
+              <span style={{width:22,height:22,borderRadius:"50%",background:C.g600,color:"white",fontSize:11,fontWeight:900,display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,marginTop:1}}>{n}</span>
+              <span style={{fontSize:13,color:C.s700,lineHeight:1.5}}>{t}</span>
+            </div>
+          ))}
+          <div style={{marginTop:12,padding:"10px 14px",background:"rgba(5,150,105,.08)",borderRadius:10,fontSize:12,color:C.g700,lineHeight:1.6}}>
+            💡 Tài khoản mới được tặng <strong>$5 credit miễn phí</strong> — đủ tạo vài trăm đề bài. Sau đó nạp thêm nếu cần (~$3–5/tháng).
+          </div>
+        </div>
+
+        <div style={{marginBottom:14}}>
+          <label style={{display:"block",fontSize:10,fontWeight:900,textTransform:"uppercase",letterSpacing:"0.15em",color:C.s400,marginBottom:7}}>Anthropic API Key</label>
+          <input value={key} onChange={e=>{setKey(e.target.value);setOk(false);setMsg("");}}
+            placeholder="sk-ant-api03-..." type="password"
+            style={{width:"100%",padding:"13px 16px",background:C.s50,border:`2px solid ${ok?C.g200:C.s200}`,borderRadius:13,fontSize:13,outline:"none",color:C.s900,fontFamily:"monospace",transition:"border-color 0.2s"}}
+            onFocus={e=>e.target.style.borderColor=C.g600} onBlur={e=>e.target.style.borderColor=ok?C.g200:C.s200}/>
+        </div>
+
+        {msg && <div style={{padding:"10px 14px",borderRadius:10,marginBottom:14,fontSize:13,fontWeight:600,background:ok?C.g50:C.r50,color:ok?C.g700:C.r600,border:`1px solid ${ok?C.g100:C.r100}`}}>{msg}</div>}
+
+        <div style={{display:"flex",gap:10,marginBottom:16}}>
+          <Btn onClick={test} disabled={!key.trim()||testing} variant="outline" sx={{flex:1}}>
+            {testing?<Ic.Spin width={16} height={16} style={{color:C.g600}}/>:I(Ic.Eye)} Kiểm tra kết nối
+          </Btn>
+          <Btn onClick={()=>{setApiKey(key.trim());onDone();}} disabled={!ok} sx={{flex:1}}>
+            {I(Ic.Check)} Lưu và tiếp tục
+          </Btn>
+        </div>
+
+        <p style={{fontSize:11,color:C.s400,textAlign:"center",lineHeight:1.7}}>
+          🔒 API Key lưu trên máy bạn (localStorage), không gửi đi đâu ngoài Anthropic.<br/>
+          ⚠️ Nút "Kiểm tra" chỉ hoạt động trên HTTPS (GitHub Pages). Nếu dùng file local, bỏ qua bước test, nhập key và nhấn Lưu luôn.
+        </p>
+      </div>
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════
+// SETUP SCREEN — nhập Firebase URL lần đầu
+// ═══════════════════════════════════════════════════════
+function SetupScreen({ onDone }) {
+  const [url,  setUrl]    = useState("");
+  const [testing,setTest] = useState(false);
+  const [msg,  setMsg]    = useState("");
+  const [ok,   setOk]     = useState(false);
+
+  const test = async () => {
+    const clean = url.trim().replace(/\/+$/,"");
+    if(!clean || !clean.startsWith("https://")) { setMsg("❌ Link không hợp lệ. Phải bắt đầu bằng https://"); return; }
+    setTest(true); setMsg("Đang kiểm tra kết nối...");
+    try {
+      const pass = await DB.test(clean);
+      if(pass) { setMsg("✅ Kết nối thành công!"); setOk(true); }
+      else      { setMsg("❌ Kết nối thất bại. Kiểm tra lại link và quy tắc database."); setOk(false); }
+    } catch(e) { setMsg("❌ Lỗi: " + e.message); setOk(false); }
+    finally { setTest(false); }
+  };
+
+  const save = () => {
+    const clean = url.trim().replace(/\/+$/,"");
+    setDbUrl(clean);
+    onDone();
+  };
+
+  return (
+    <div style={{minHeight:"100vh",background:"#FBFBFB",display:"flex",alignItems:"center",justifyContent:"center",padding:20}}>
+      <div className="fade-in" style={{width:"100%",maxWidth:560,background:"white",borderRadius:26,padding:36,boxShadow:"0 20px 60px rgba(0,0,0,.09)",border:`1px solid ${C.s100}`}}>
+        {/* Header */}
+        <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:28}}>
+          <div style={{width:48,height:48,background:`linear-gradient(135deg,${C.g600},${C.g700})`,borderRadius:13,display:"flex",alignItems:"center",justifyContent:"center",color:"white",boxShadow:`0 6px 20px ${C.g600}30`}}>
+            {I(Ic.Db,24)}
+          </div>
+          <div>
+            <h2 style={{fontSize:20,fontWeight:900,color:C.s900,lineHeight:1.2}}>Cấu hình Firebase Database</h2>
+            <p style={{fontSize:13,color:C.s400,marginTop:3}}>Thực hiện 1 lần duy nhất — lưu mãi mãi</p>
+          </div>
+        </div>
+
+        {/* Steps */}
+        <div style={{background:C.g50,border:`1px solid ${C.g100}`,borderRadius:16,padding:"18px 20px",marginBottom:24}}>
+          <div style={{fontSize:12,fontWeight:900,color:C.g700,textTransform:"uppercase",letterSpacing:"0.1em",marginBottom:12}}>Cách lấy Firebase Database URL</div>
+          {[
+            ["1","Vào console.firebase.google.com → Tạo Project mới (nhấn Add project)"],
+            ["2","Trong Project, chọn Build → Realtime Database → Create Database"],
+            ["3","Chọn vùng (chọn Singapore cho nhanh) → Start in test mode → Enable"],
+            ["4","Copy đường link dạng: https://[tên-project]-default-rtdb.asia-southeast1.firebasedatabase.app"],
+          ].map(([n,t])=>(
+            <div key={n} style={{display:"flex",gap:10,marginBottom:10,alignItems:"flex-start"}}>
+              <span style={{width:22,height:22,borderRadius:"50%",background:C.g600,color:"white",fontSize:11,fontWeight:900,display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,marginTop:1}}>{n}</span>
+              <span style={{fontSize:13,color:C.s700,lineHeight:1.5}}>{t}</span>
+            </div>
+          ))}
+        </div>
+
+        {/* Input */}
+        <div style={{marginBottom:16}}>
+          <label style={{display:"block",fontSize:10,fontWeight:900,textTransform:"uppercase",letterSpacing:"0.15em",color:C.s400,marginBottom:7}}>
+            Firebase Database URL
+          </label>
+          <input value={url} onChange={e=>{setUrl(e.target.value);setOk(false);setMsg("");}}
+            placeholder="https://my-project-default-rtdb.asia-southeast1.firebasedatabase.app"
+            style={{width:"100%",padding:"13px 16px",background:C.s50,border:`2px solid ${ok?C.g200:C.s200}`,borderRadius:13,fontSize:13,outline:"none",color:C.s900,fontFamily:"monospace",transition:"border-color 0.2s"}}
+            onFocus={e=>e.target.style.borderColor=C.g600} onBlur={e=>e.target.style.borderColor=ok?C.g200:C.s200}/>
+        </div>
+
+        {msg && (
+          <div style={{padding:"10px 14px",borderRadius:10,marginBottom:14,fontSize:13,fontWeight:600,
+            background:ok?C.g50:C.r50,color:ok?C.g700:C.r600,border:`1px solid ${ok?C.g100:C.r100}`}}>
+            {msg}
+          </div>
+        )}
+
+        <div style={{display:"flex",gap:10}}>
+          <Btn onClick={test} disabled={!url.trim()||testing} variant="outline" sx={{flex:1}}>
+            {testing?<Ic.Spin width={16} height={16}/>:I(Ic.Eye)} Kiểm tra kết nối
+          </Btn>
+          <Btn onClick={save} disabled={!ok} sx={{flex:1}}>
+            {I(Ic.Check)} Lưu và bắt đầu
+          </Btn>
+        </div>
+
+        <p style={{marginTop:18,fontSize:11,color:C.s400,textAlign:"center",lineHeight:1.6}}>
+          💡 Sau khi lưu, bạn có thể đổi database bất kỳ lúc nào qua nút ⚙️ Cài đặt trên trang chủ.
+        </p>
+      </div>
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════
+// APP ROUTER
+// ═══════════════════════════════════════════════════════
+function App() {
+  const [screen,   setScreen]   = useState("home");
+  const [initCode, setInitCode] = useState("");
+  const [hasKey,   setHasKey]   = useState(!!getApiKey());
+  const [hasDb,    setHasDb]    = useState(!!getDbUrl());
+
+  // Bước 1: cần API key trước
+  if (!hasKey) return <ApiKeyScreen onDone={()=>setHasKey(true)} />;
+  // Bước 2: cần Firebase URL
+  if (!hasDb)  return <SetupScreen  onDone={()=>setHasDb(true)} />;
+
+  if (screen==="teacher") return <TeacherApp onHome={()=>setScreen("home")} />;
+  if (screen==="student") return <StudentApp initCode={initCode} onHome={()=>setScreen("home")} />;
+  return <HomePage
+    onTeacher={()=>setScreen("teacher")}
+    onStudent={c=>{setInitCode(c);setScreen("student");}}
+    onSetup={()=>{clearDbUrl();setHasDb(false);}}
+    onChangeKey={()=>{clearApiKey();setHasKey(false);}}
+  />;
+}
+
+// ═══════════════════════════════════════════════════════
+// HOME PAGE
+// ═══════════════════════════════════════════════════════
+function HomePage({ onTeacher, onStudent, onSetup, onChangeKey }) {
+  const [code, setCode] = useState("");
+  const [hov,  setHov]  = useState(false);
+  const go = () => { if(code.trim().length>=4) onStudent(code.trim()); };
+  return (
+    <div style={{minHeight:"100vh",background:"#FBFBFB",display:"flex",alignItems:"center",justifyContent:"center",position:"relative",overflow:"hidden"}}>
+      <div style={{position:"absolute",inset:0,pointerEvents:"none"}}>
+        <div style={{position:"absolute",top:"-20%",left:"-12%",width:"55%",height:"55%",background:"radial-gradient(circle,rgba(209,250,233,.55) 0%,transparent 70%)"}}/>
+        <div style={{position:"absolute",bottom:"-18%",right:"-10%",width:"50%",height:"50%",background:"radial-gradient(circle,rgba(219,234,254,.5) 0%,transparent 70%)"}}/>
+      </div>
+      <div className="fade-in" style={{position:"relative",zIndex:10,width:"100%",maxWidth:440,padding:"0 20px",display:"flex",flexDirection:"column",gap:32,alignItems:"center"}}>
+        <div style={{textAlign:"center"}}>
+          <div style={{width:88,height:88,background:`linear-gradient(135deg,${C.g600},${C.g700})`,borderRadius:26,display:"flex",alignItems:"center",justifyContent:"center",margin:"0 auto 18px",boxShadow:`0 22px 60px ${C.g600}45`,transform:"rotate(-5deg)",color:"white"}}>
+            {I(Ic.Logo,44)}
+          </div>
+          <h1 style={{fontSize:36,fontWeight:900,color:C.s900,marginBottom:8,letterSpacing:"-0.03em"}}>AI EduBank Pro</h1>
+          <p style={{color:C.s400,fontSize:15}}>Hệ thống học liệu phân hóa thông minh</p>
+        </div>
+
+        <div style={{width:"100%",display:"flex",flexDirection:"column",gap:12}}>
+          <button onMouseEnter={()=>setHov(true)} onMouseLeave={()=>setHov(false)} onClick={onTeacher}
+            style={{width:"100%",display:"flex",alignItems:"center",padding:"18px 22px",background:"white",border:`2px solid ${hov?C.g200:C.s100}`,borderRadius:22,cursor:"pointer",textAlign:"left",boxShadow:hov?`0 14px 44px ${C.g600}14`:"0 2px 8px rgba(0,0,0,.04)",transition:"all 0.2s"}}>
+            <div style={{width:52,height:52,background:hov?C.g600:C.g50,borderRadius:14,display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,marginRight:16,transition:"all 0.2s",color:hov?"white":C.g600}}>
+              {I(Ic.Book,26)}
+            </div>
+            <div style={{flex:1}}>
+              <div style={{fontSize:16,fontWeight:800,color:C.s900}}>Dành cho Giáo viên</div>
+              <div style={{fontSize:13,color:C.s400,marginTop:3}}>Tạo ngân hàng đề → Chia sẻ cho học sinh</div>
+            </div>
+            <span style={{color:hov?C.g600:C.s300}}>{I(Ic.Arrow,18)}</span>
+          </button>
+
+          <div style={{padding:"18px 22px",background:"white",border:`2px solid ${C.s100}`,borderRadius:22,boxShadow:"0 2px 8px rgba(0,0,0,.04)"}}>
+            <div style={{display:"flex",alignItems:"center",marginBottom:14}}>
+              <div style={{width:52,height:52,background:C.b50,borderRadius:14,display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,marginRight:16,color:C.b600}}>
+                {I(Ic.Play,26)}
+              </div>
+              <div>
+                <div style={{fontSize:16,fontWeight:800,color:C.s900}}>Dành cho Học sinh</div>
+                <div style={{fontSize:13,color:C.s400,marginTop:3}}>Nhập mã bài tập để làm bài ngay</div>
+              </div>
+            </div>
+            <div style={{display:"flex",gap:8}}>
+              <input value={code} onChange={e=>setCode(e.target.value.toUpperCase())} onKeyDown={e=>e.key==="Enter"&&go()} maxLength={8}
+                placeholder="Nhập mã bài tập (VD: ABC123)"
+                style={{flex:1,padding:"11px 14px",background:C.s50,border:`1.5px solid ${C.s200}`,borderRadius:12,fontSize:14,fontFamily:"monospace",fontWeight:700,letterSpacing:"0.08em",outline:"none",color:C.s900}}/>
+              <Btn onClick={go} variant="blue" sx={{borderRadius:12,padding:"11px 18px"}}>Vào thi</Btn>
+            </div>
+          </div>
+        </div>
+
+        {/* Settings buttons */}
+        <div style={{display:"flex",gap:16,alignItems:"center"}}>
+          <button onClick={onChangeKey} style={{display:"flex",alignItems:"center",gap:5,fontSize:11,color:C.s400,background:"none",border:"none",cursor:"pointer",padding:"5px 8px"}}>
+            🔑 Đổi API Key
+          </button>
+          <span style={{color:C.s200,fontSize:14}}>|</span>
+          <button onClick={onSetup} style={{display:"flex",alignItems:"center",gap:5,fontSize:11,color:C.s400,background:"none",border:"none",cursor:"pointer",padding:"5px 8px"}}>
+            {I(Ic.Cog,12)} Đổi Firebase
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════
+// TEACHER APP
+// ═══════════════════════════════════════════════════════
+function TeacherApp({ onHome }) {
+  const [section,   setSection]   = useState("create");
+  const [step,      setStep]      = useState("input");
+  const [topic,     setTopic]     = useState("");
+  const [material,  setMaterial]  = useState("");
+  const [matrix,    setMatrix]    = useState([]);
+  const [questions, setQuestions] = useState([]);
+  const [tab,       setTab]       = useState("matrix");
+  const [loadMsg,   setLoadMsg]   = useState("");
+  const [err,       setErr]       = useState("");
+  const [codes,     setCodes]     = useState({});
+  const [justCopied,setJustCopied]= useState("");
+  const [fileLoading,setFileLoading]=useState(false);
+  const [fileErr,   setFileErr]   = useState("");
+  const [pdfFiles,  setPdfFiles]  = useState([]); // [{name, base64, size}] — PDF gửi thẳng vào Claude
+  const [library,   setLibrary]   = useState(DocLib.getAll());
+  const [docName,   setDocName]   = useState("");
+  const fileRef = useRef(null);
+
+  const MSGS = ["Đang phân tích tài liệu tham khảo...","Đang xây dựng ma trận phân hóa A-B-C...","Đang soạn câu hỏi theo thang Bloom...","Đang kiểm tra tính sư phạm...","Sắp hoàn tất, vui lòng chờ thêm..."];
+
+  const handleGenerate = async () => {
+    if (!topic.trim()) return;
+    setErr(""); setStep("loading");
+    let i=0; setLoadMsg(MSGS[0]);
+    const iv = setInterval(()=>{ i=(i+1)%MSGS.length; setLoadMsg(MSGS[i]); }, 2400);
+    try {
+      const data = await generateBank(topic.trim(), material.trim(), pdfFiles);
+      if (!data.questions?.length) throw new Error("AI không tạo được câu hỏi. Hãy thêm tài liệu chi tiết hơn.");
+      setMatrix(data.matrix||[]); setQuestions(data.questions);
+      setStep("result"); setTab("matrix"); setCodes({});
+    } catch(e) { setErr(e.message); setStep("input"); }
+    finally { clearInterval(iv); }
+  };
+
+  const handleFile = async e => {
+    const files = Array.from(e.target.files || []);
+    if (fileRef.current) fileRef.current.value = "";
+    if (!files.length) return;
+    setFileLoading(true); setFileErr("");
+    try {
+      for (const f of files) {
+        const name = f.name.toLowerCase();
+        const isPdf = f.type === 'application/pdf' || name.endsWith('.pdf');
+        if (isPdf) {
+          // ⭐ PDF: đọc thành base64, gửi thẳng vào Claude — không cần OCR
+          const MB = f.size / 1024 / 1024;
+          if (MB > 30) throw new Error(`File "${f.name}" quá lớn (${MB.toFixed(1)}MB). Giới hạn 30MB mỗi file PDF.`);
+          const base64 = await fileToBase64(f);
+          setPdfFiles(prev => {
+            // Tránh trùng tên
+            const filtered = prev.filter(p => p.name !== f.name);
+            return [...filtered, { name: f.name, base64, size: f.size, sizeMB: MB.toFixed(1) }];
+          });
+          setDocName(f.name.replace(/\.[^.]+$/, ''));
+        } else {
+          // DOCX / TXT: trích xuất văn bản
+          const text = await extractTextFile(f);
+          setMaterial(prev => prev ? prev + '\n\n---\n\n' + text.slice(0, 8000) : text.slice(0, 8000));
+          setDocName(f.name.replace(/\.[^.]+$/, ''));
+        }
+      }
+    } catch(err) {
+      setFileErr(err.message);
+    } finally {
+      setFileLoading(false);
+    }
+  };
+
+  const handleRemovePdf = (name) => {
+    setPdfFiles(prev => prev.filter(p => p.name !== name));
+  };
+
+  const handleSaveToLib = () => {
+    if (!material.trim()) return;
+    const name = docName.trim() || topic.trim() || `Tài liệu ${new Date().toLocaleDateString('vi-VN')}`;
+    const updated = DocLib.save(name, material);
+    setLibrary(updated);
+    setDocName(name);
+  };
+
+  const handleSelectFromLib = (doc) => {
+    setMaterial(doc.content);
+    setDocName(doc.name);
+    setFileErr("");
+  };
+
+  const handleDeleteFromLib = (id) => {
+    const updated = DocLib.delete(id);
+    setLibrary(updated);
+  };
+
+  const handleShare = async lv => {
+    const qs = lv==="all" ? questions : questions.filter(q=>q.level===lv);
+    if (!qs.length) { alert("Không có câu hỏi ở mức này."); return; }
+    const code = genCode();
+    try {
+      await saveQuiz(code, {title:topic+(lv==="all"?" — Tổng hợp":` — Mức ${lv}`), level:lv, questions:qs, createdAt:new Date().toISOString()});
+      setCodes(p=>({...p,[lv]:code}));
+      setJustCopied(lv);
+      try { await navigator.clipboard.writeText(code); } catch {}
+      setTimeout(()=>setJustCopied(""), 4000);
+    } catch(e) { alert("Lỗi lưu bài tập: " + e.message); }
+  };
+
+  const downloadCSV = () => {
+    const hdr = ["Mã đề","Mức","Loại","Câu hỏi","Đáp án","Giải thích","Lỗi thường gặp"];
+    const rows = questions.map(q=>{
+      const ans = q.type==="true_false" ? (q.subQuestions?.map((s,i)=>`${String.fromCharCode(97+i)}:${s.answer==="true"?"Đ":"S"}`).join("; ")||"") : q.answer;
+      return [q.code||"",q.level,TYPE_LABEL[q.type]||q.type,(q.content||"").replace(/\n/g," "),ans,q.explanation||"",q.commonErrors||""].map(v=>`"${String(v).replace(/"/g,'""')}"`).join(",");
+    });
+    const blob = new Blob(["\uFEFF"+[hdr.join(","),...rows].join("\r\n")],{type:"text/csv;charset=utf-8;"});
+    const a=document.createElement("a"); a.href=URL.createObjectURL(blob); a.download=`NganHang_${topic.replace(/[^\w]/g,"_").slice(0,40)}.csv`; a.click();
+  };
+
+  return (
+    <div style={{minHeight:"100vh",background:"#FAFAFA"}}>
+      <header style={{position:"sticky",top:0,zIndex:50,background:"rgba(255,255,255,.97)",backdropFilter:"blur(12px)",borderBottom:`1px solid ${C.s100}`,padding:"12px 22px"}}>
+        <div style={{maxWidth:920,margin:"0 auto",display:"flex",alignItems:"center",gap:12,flexWrap:"wrap"}}>
+          <Logo onClick={onHome}/>
+          <div style={{flex:1}}/>
+          <TabBar tabs={[["create","Tạo bài tập",Ic.Book],["results","Kết quả HS",Ic.Users]]} value={section} onChange={setSection}/>
+          {step==="result"&&<button onClick={()=>{setStep("input");setSection("create");}} style={{display:"flex",alignItems:"center",gap:5,fontSize:12,fontWeight:700,color:C.s400,background:"none",border:"none",cursor:"pointer",padding:"6px 9px",borderRadius:8}}>{I(Ic.Redo,13)} Tạo mới</button>}
+          <button onClick={onHome} style={{display:"flex",alignItems:"center",gap:5,fontSize:12,fontWeight:700,color:C.s400,background:"none",border:"none",cursor:"pointer",padding:"6px 9px",borderRadius:8}}>{I(Ic.Home,13)} Trang chủ</button>
+        </div>
+      </header>
+      <main style={{maxWidth:920,margin:"0 auto",padding:"36px 18px 70px"}}>
+        {section==="create"&&step==="input"   && <InputStep {...{topic,setTopic,material,setMaterial,onGenerate:handleGenerate,fileRef,onFile:handleFile,err,fileLoading,fileErr,setFileErr,pdfFiles,onRemovePdf:handleRemovePdf,library,docName,setDocName,onSaveToLib:handleSaveToLib,onSelectFromLib:handleSelectFromLib,onDeleteFromLib:handleDeleteFromLib}}/>}
+        {section==="create"&&step==="loading" && <LoadingStep msg={loadMsg}/>}
+        {section==="create"&&step==="result"  && <ResultStep {...{matrix,questions,tab,setTab,onShare:handleShare,codes,justCopied,onDownload:downloadCSV,topic}}/>}
+        {section==="results" && <ResultsSection/>}
+      </main>
+    </div>
+  );
+}
+
+function InputStep({ topic,setTopic,material,setMaterial,onGenerate,fileRef,onFile,err,fileLoading,fileErr,setFileErr,pdfFiles,onRemovePdf,library,docName,setDocName,onSaveToLib,onSelectFromLib,onDeleteFromLib }) {
+  const [showLib, setShowLib] = useState(false);
+  const [saveMsg, setSaveMsg] = useState("");
+
+  const handleSave = () => {
+    onSaveToLib();
+    setSaveMsg("✓ Đã lưu vào kho!");
+    setTimeout(() => setSaveMsg(""), 2500);
+  };
+
+  const fmtSize = n => n >= 1000 ? `${(n/1000).toFixed(1)}K ký tự` : `${n} ký tự`;
+  const fmtDate = s => new Date(s).toLocaleDateString('vi-VN', {day:'2-digit',month:'2-digit',year:'numeric'});
+
+  return (
+    <div className="fade-in" style={{maxWidth:720,margin:"0 auto",display:"flex",flexDirection:"column",gap:28}}>
+      <div style={{textAlign:"center"}}>
+        <h2 style={{fontSize:30,fontWeight:900,color:C.s900,marginBottom:10,letterSpacing:"-0.02em"}}>Chào mừng Giáo viên 👋</h2>
+        <p style={{color:C.s400,fontSize:15,maxWidth:500,margin:"0 auto"}}>Nhập tên bài học và tài liệu tham khảo để AI tạo ngân hàng câu hỏi phân hóa chuẩn sư phạm.</p>
+      </div>
+
+      {err&&<div style={{background:C.r50,border:`1px solid ${C.r100}`,borderRadius:14,padding:"14px 18px",color:C.r600,fontSize:13,display:"flex",gap:10,alignItems:"flex-start"}}><span style={{flexShrink:0,marginTop:1}}>{I(Ic.X,18)}</span><span>{err}</span></div>}
+
+      <div style={{background:"white",padding:32,borderRadius:26,boxShadow:"0 12px 50px rgba(0,0,0,.06)",border:`1px solid ${C.s100}`}}>
+        {/* Tên bài học */}
+        <div style={{marginBottom:24}}>
+          <label style={{display:"block",fontSize:10,fontWeight:900,textTransform:"uppercase",letterSpacing:"0.18em",color:C.s400,marginBottom:8}}>Tên bài học / Chủ đề <span style={{color:C.r600}}>*</span></label>
+          <input value={topic} onChange={e=>setTopic(e.target.value)} onKeyDown={e=>e.key==="Enter"&&topic.trim()&&onGenerate()}
+            placeholder="VD: Bài 19 Tin học 10 — Câu lệnh rẽ nhánh if-else"
+            style={{width:"100%",padding:"14px 18px",background:C.s50,border:`2px solid ${topic?C.g200:C.s200}`,borderRadius:14,fontSize:15,fontWeight:600,outline:"none",color:C.s900,transition:"border-color 0.2s"}}
+            onFocus={e=>e.target.style.borderColor=C.g600} onBlur={e=>e.target.style.borderColor=topic?C.g200:C.s200}/>
+          <p style={{marginTop:6,fontSize:11,color:C.s400}}>Tên càng cụ thể, AI ra đề càng trúng tâm.</p>
+        </div>
+
+        {/* Tài liệu tham khảo */}
+        <div style={{marginBottom:24}}>
+          <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:10,gap:8,flexWrap:"wrap"}}>
+            <label style={{fontSize:10,fontWeight:900,textTransform:"uppercase",letterSpacing:"0.18em",color:C.s400}}>Tài liệu tham khảo</label>
+            <div style={{display:"flex",gap:7,alignItems:"center"}}>
+              {/* Nút kho tài liệu */}
+              <button onClick={()=>setShowLib(!showLib)}
+                style={{display:"flex",alignItems:"center",gap:5,padding:"6px 12px",background:showLib?C.g600:C.g50,color:showLib?"white":C.g600,borderRadius:8,border:`1px solid ${C.g200}`,cursor:"pointer",fontSize:11,fontWeight:900,letterSpacing:"0.05em",position:"relative"}}>
+                {I(Ic.Layers,12)} Kho tài liệu
+                {library.length>0&&<span style={{position:"absolute",top:-6,right:-6,width:16,height:16,background:C.r600,color:"white",borderRadius:"50%",fontSize:8,fontWeight:900,display:"flex",alignItems:"center",justifyContent:"center"}}>{library.length}</span>}
+              </button>
+              {/* Nút tải file */}
+              <button onClick={()=>fileRef.current?.click()} disabled={fileLoading}
+                style={{display:"flex",alignItems:"center",gap:5,padding:"6px 12px",background:fileLoading?C.s100:C.b50,color:fileLoading?C.s400:C.b600,borderRadius:8,border:`1px solid ${fileLoading?C.s200:C.b100}`,cursor:fileLoading?"not-allowed":"pointer",fontSize:11,fontWeight:900,letterSpacing:"0.05em"}}>
+                {fileLoading ? <Ic.Spin width={12} height={12} style={{color:C.g600}}/> : I(Ic.Upload,12)}
+                {fileLoading ? "Đang xử lý..." : "Tải file lên"}
+              </button>
+            </div>
+          </div>
+
+          {/* Input file ẩn — chấp nhận PDF, DOCX, TXT — nhiều file cùng lúc */}
+          <input ref={fileRef} type="file" multiple
+            accept=".txt,.pdf,.doc,.docx,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            style={{display:"none"}} onChange={onFile}/>
+
+          {/* Thông báo lỗi file — hiển thị nhiều dòng */}
+          {fileErr&&(
+            <div style={{padding:"14px 16px",background:C.r50,border:`1.5px solid ${C.r100}`,borderRadius:12,marginBottom:10}}>
+              <div style={{display:"flex",alignItems:"flex-start",gap:8,marginBottom:8}}>
+                <span style={{fontSize:16,flexShrink:0}}>⚠️</span>
+                <div style={{flex:1}}>
+                  {fileErr.split('\n').map((line,i)=>(
+                    <p key={i} style={{fontSize:12,color:line.startsWith('✅')||line.startsWith('→')||line.startsWith('1.')||line.startsWith('2.')||line.startsWith('3.')||line.startsWith('4.')?C.g700:line.startsWith('Hoặc')?C.b600:C.r700,lineHeight:1.6,margin:0,marginTop:i>0?3:0,fontWeight:line.startsWith('✅')?800:400}}>
+                      {line}
+                    </p>
+                  ))}
+                </div>
+                <button onClick={()=>setFileErr("")} style={{background:"none",border:"none",cursor:"pointer",color:C.s400,fontSize:18,lineHeight:1,flexShrink:0}}>×</button>
+              </div>
+            </div>
+          )}
+
+          {/* Danh sách PDF đã tải — hiển thị badge, xóa được */}
+          {pdfFiles.length > 0 && (
+            <div style={{marginBottom:10}}>
+              {pdfFiles.map(f => (
+                <div key={f.name} style={{display:"flex",alignItems:"center",gap:8,padding:"8px 12px",background:"#EFF6FF",border:`1.5px solid ${C.b100}`,borderRadius:10,marginBottom:6}}>
+                  <span style={{fontSize:17,flexShrink:0}}>📄</span>
+                  <div style={{flex:1,minWidth:0}}>
+                    <div style={{fontSize:13,fontWeight:700,color:C.b700,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{f.name}</div>
+                    <div style={{fontSize:10,color:C.b600,marginTop:1}}>PDF · {f.sizeMB}MB · ⭐ Gửi thẳng vào Claude — đọc chính xác như AI Studio</div>
+                  </div>
+                  <button onClick={()=>onRemovePdf(f.name)} style={{background:"none",border:"none",cursor:"pointer",color:C.s400,fontSize:17,lineHeight:1,flexShrink:0,padding:"0 4px"}}>×</button>
+                </div>
+              ))}
+              <div style={{fontSize:11,color:C.g700,background:C.g50,padding:"6px 12px",borderRadius:8,border:`1px solid ${C.g100}`}}>
+                ✅ Claude sẽ đọc toàn bộ {pdfFiles.length} file PDF kể trên, kể cả bản scan — không cần trích xuất chữ trước
+              </div>
+            </div>
+          )}
+
+          {/* Kho tài liệu panel */}
+          {showLib && (
+            <div style={{background:C.s50,border:`1.5px solid ${C.g100}`,borderRadius:16,marginBottom:12,overflow:"hidden"}}>
+              <div style={{padding:"12px 16px",background:C.g50,borderBottom:`1px solid ${C.g100}`,display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+                <div style={{fontSize:12,fontWeight:900,color:C.g700}}>📚 Kho tài liệu ({library.length}/30)</div>
+                <button onClick={()=>setShowLib(false)} style={{background:"none",border:"none",cursor:"pointer",color:C.s400,fontSize:18,lineHeight:1}}>×</button>
+              </div>
+              {library.length===0
+                ? <div style={{padding:"24px 16px",textAlign:"center",color:C.s400,fontSize:13}}>Chưa có tài liệu nào được lưu.<br/><span style={{fontSize:12}}>Tải file lên và nhấn "Lưu vào kho" để bắt đầu.</span></div>
+                : <div style={{maxHeight:260,overflowY:"auto"}}>
+                    {library.map(doc=>(
+                      <div key={doc.id} style={{display:"flex",alignItems:"center",gap:10,padding:"11px 16px",borderBottom:`1px solid ${C.s100}`,background:"white"}}>
+                        <div style={{fontSize:18,flexShrink:0}}>{doc.type==='pdf'?'📄':doc.type==='docx'?'📝':'📃'}</div>
+                        <div style={{flex:1,minWidth:0}}>
+                          <div style={{fontSize:13,fontWeight:700,color:C.s900,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{doc.name}</div>
+                          <div style={{fontSize:10,color:C.s400,marginTop:2}}>{fmtDate(doc.savedAt)} · {fmtSize(doc.size)}</div>
+                        </div>
+                        <div style={{display:"flex",gap:6,flexShrink:0}}>
+                          <button onClick={()=>{onSelectFromLib(doc);setShowLib(false);}}
+                            style={{padding:"5px 11px",background:C.g600,color:"white",borderRadius:7,border:"none",cursor:"pointer",fontSize:11,fontWeight:900}}>
+                            Dùng
+                          </button>
+                          <button onClick={()=>onDeleteFromLib(doc.id)}
+                            style={{padding:"5px 8px",background:C.r50,color:C.r600,borderRadius:7,border:`1px solid ${C.r100}`,cursor:"pointer",fontSize:11,fontWeight:900}}>
+                            {I(Ic.X,11)}
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+              }
+            </div>
+          )}
+
+          {/* Tên tài liệu hiện tại (nếu đã tải) */}
+          {docName&&material&&(
+            <div style={{display:"flex",alignItems:"center",gap:8,padding:"7px 12px",background:C.b50,border:`1px solid ${C.b100}`,borderRadius:9,marginBottom:8}}>
+              <span style={{fontSize:12,color:C.b600,fontWeight:700,flex:1}}>📄 {docName}</span>
+              <button onClick={()=>{setMaterial("");setDocName("");}} style={{background:"none",border:"none",cursor:"pointer",color:C.s400,fontSize:14,lineHeight:1}}>×</button>
+            </div>
+          )}
+
+          {/* Textarea nhập tay */}
+          <textarea value={material} onChange={e=>setMaterial(e.target.value)}
+            placeholder={"Dán nội dung bài học từ SGK, giáo án...\nHoặc tải file PDF/Word/TXT bằng nút 'Tải file lên' phía trên.\n\nNếu để trống, AI dùng kiến thức chuẩn chương trình phổ thông."}
+            style={{width:"100%",padding:"14px 18px",background:C.s50,border:`2px solid ${material?C.g100:C.s200}`,borderRadius:14,fontSize:13,outline:"none",resize:"vertical",minHeight:150,lineHeight:1.7,color:C.s900,transition:"border-color 0.2s"}}
+            onFocus={e=>e.target.style.borderColor=C.g600} onBlur={e=>e.target.style.borderColor=material?C.g100:C.s200}/>
+
+          {/* Footer của ô tài liệu */}
+          {(material || pdfFiles.length > 0) && (
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginTop:8,gap:8,flexWrap:"wrap"}}>
+              <span style={{fontSize:10,fontWeight:700,color:C.g600}}>
+                {pdfFiles.length > 0 && `✓ ${pdfFiles.length} file PDF`}
+                {pdfFiles.length > 0 && material && " + "}
+                {material && `${material.length.toLocaleString()} ký tự`}
+              </span>
+              <div style={{display:"flex",gap:7,alignItems:"center"}}>
+                {saveMsg
+                  ? <span style={{fontSize:11,fontWeight:700,color:C.g600}}>{saveMsg}</span>
+                  : <button onClick={handleSave} style={{display:"flex",alignItems:"center",gap:4,padding:"4px 10px",background:C.g50,color:C.g700,borderRadius:7,border:`1px solid ${C.g200}`,cursor:"pointer",fontSize:11,fontWeight:800}}>
+                      💾 Lưu vào kho
+                    </button>
+                }
+                <button onClick={()=>{setMaterial("");setDocName("");}} style={{fontSize:11,fontWeight:700,color:C.s400,background:"none",border:"none",cursor:"pointer"}}>Xóa text</button>
+              </div>
+            </div>
+          )}
+
+          {/* Định dạng hỗ trợ */}
+          <div style={{display:"flex",gap:8,marginTop:10,flexWrap:"wrap",alignItems:"center"}}>
+            <span style={{fontSize:10,fontWeight:700,color:C.s500}}>Hỗ trợ:</span>
+            {[["📄","PDF (scan & text)","blue"],["📝","Word (.docx)","gray"],["📃","TXT","gray"],["✏️","Dán tay","gray"]].map(([icon,label,t])=>(
+              <span key={label} style={{fontSize:10,fontWeight:600,color:t==="blue"?C.b700:C.s500,background:t==="blue"?C.b50:C.s100,padding:"3px 9px",borderRadius:99,border:t==="blue"?`1px solid ${C.b100}`:"none"}}>{icon} {label}</span>
+            ))}
+            <span style={{fontSize:10,color:C.s400,marginLeft:4}}>· Chọn nhiều file cùng lúc</span>
+          </div>
+        </div>
+
+        <Btn onClick={onGenerate} disabled={!topic.trim()} sx={{width:"100%",padding:17,fontSize:16,borderRadius:16}}>
+          Bắt đầu quy trình 4 bước &nbsp;{I(Ic.Arrow,20)}
+        </Btn>
+      </div>
+
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(180px,1fr))",gap:12}}>
+        {[["⚡","Nhanh chóng","15+ câu hỏi phân hóa trong 1–3 phút"],["🎯","Phân hóa","Mức A/B/C theo thang Bloom chuẩn sư phạm"],["☁️","Đám mây","Dữ liệu lưu Firebase, HS nhiều máy cùng nộp bài"]].map(([e,t,d])=>(
+          <div key={t} style={{background:"white",padding:"16px 18px",borderRadius:16,border:`1px solid ${C.s100}`}}>
+            <div style={{fontSize:22,marginBottom:7}}>{e}</div>
+            <div style={{fontSize:13,fontWeight:800,color:C.s900,marginBottom:4}}>{t}</div>
+            <div style={{fontSize:12,color:C.s400,lineHeight:1.5}}>{d}</div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function LoadingStep({ msg }) {
+  const steps=["Phân tích tài liệu","Xây dựng ma trận","Soạn câu hỏi","Kiểm tra sư phạm"];
+  const [active,setActive]=useState(0);
+  useEffect(()=>{ const t=setInterval(()=>setActive(a=>(a+1)%steps.length),2400); return()=>clearInterval(t); },[]);
+  return (
+    <div style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",minHeight:440,gap:30}}>
+      <Ic.Spin width={52} height={52} style={{color:C.g600}}/>
+      <div style={{textAlign:"center"}}>
+        <p style={{fontSize:17,fontWeight:800,color:C.g600,marginBottom:7}}>{msg}</p>
+        <p style={{fontSize:13,color:C.s400}}>AI đang làm việc, vui lòng không đóng trang này</p>
+      </div>
+      <div style={{display:"flex",gap:9,flexWrap:"wrap",justifyContent:"center"}}>
+        {steps.map((s,i)=>(
+          <div key={i} style={{padding:"7px 16px",borderRadius:99,fontSize:12,fontWeight:600,transition:"all 0.35s",
+            background:i<active?C.g600:i===active?C.g50:C.s100,
+            color:i<active?"white":i===active?C.g600:C.s400,border:`1px solid ${i<=active?C.g200:C.s200}`}}>
+            {i<active?"✓ ":i===active?"⟳ ":""}{s}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function ResultStep({ matrix,questions,tab,setTab,onShare,codes,justCopied,onDownload,topic }) {
+  const cnt={A:questions.filter(q=>q.level==="A").length,B:questions.filter(q=>q.level==="B").length,C:questions.filter(q=>q.level==="C").length};
+  return (
+    <div className="fade-in" style={{display:"flex",flexDirection:"column",gap:22}}>
+      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:14,flexWrap:"wrap"}}>
+        <div>
+          <h2 style={{fontSize:20,fontWeight:900,color:C.s900,marginBottom:6}}>{topic}</h2>
+          <div style={{display:"flex",gap:7,flexWrap:"wrap"}}>
+            {[["A",cnt.A,C.b600],["B",cnt.B,C.g600],["C",cnt.C,C.a600]].map(([lv,n,c])=>(
+              <span key={lv} style={{fontSize:11,fontWeight:700,color:"white",background:c,padding:"2px 9px",borderRadius:99}}>{n} câu mức {lv}</span>
+            ))}
+            <span style={{fontSize:11,fontWeight:700,color:C.s500,background:C.s100,padding:"2px 9px",borderRadius:99}}>Tổng: {questions.length} câu</span>
+          </div>
+        </div>
+        <TabBar tabs={[["matrix","Ma trận",Ic.Layers],["bank","Ngân hàng",Ic.File],["download","Xuất CSV",Ic.Table]]} value={tab} onChange={setTab}/>
+      </div>
+      <div style={{background:"white",borderRadius:24,boxShadow:"0 6px 28px rgba(0,0,0,.06)",border:`1px solid ${C.s100}`,overflow:"hidden"}}>
+        {tab==="matrix"   && <MatrixTab matrix={matrix}/>}
+        {tab==="bank"     && <BankTab questions={questions}/>}
+        {tab==="download" && <DownloadTab questions={questions} onDownload={onDownload}/>}
+      </div>
+      <ShareSection onShare={onShare} codes={codes} justCopied={justCopied}/>
+    </div>
+  );
+}
+
+function MatrixTab({ matrix }) {
+  const ST={A:{bg:"rgba(219,234,254,.18)",bdr:C.b100,icon:"📖"},B:{bg:"rgba(209,250,233,.18)",bdr:C.g100,icon:"🔍"},C:{bg:"rgba(254,243,199,.18)",bdr:C.a100,icon:"🚀"}};
+  return (
+    <div style={{padding:"26px 22px",display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(240px,1fr))",gap:18}}>
+      {matrix.map(item=>{
+        const s=ST[item.level]||ST.B;
+        return (
+          <div key={item.level} style={{padding:22,borderRadius:18,border:`2px solid ${s.bdr}`,background:s.bg}}>
+            <div style={{display:"flex",alignItems:"center",gap:9,marginBottom:12}}>
+              <span style={{fontSize:22}}>{s.icon}</span>
+              <div><Badge level={item.level}/><div style={{fontWeight:900,color:C.s900,fontSize:16,marginTop:3}}>{item.title}</div></div>
+            </div>
+            <p style={{fontSize:13,color:C.s600,lineHeight:1.6,marginBottom:14}}>{item.description}</p>
+            <div style={{borderTop:`1px solid rgba(0,0,0,.07)`,paddingTop:12}}>
+              <div style={{fontSize:9,fontWeight:900,textTransform:"uppercase",letterSpacing:"0.12em",color:C.s400,marginBottom:5}}>Yêu cầu cần đạt</div>
+              <p style={{fontSize:12,color:C.s700,lineHeight:1.6}}>{item.requirements}</p>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function BankTab({ questions }) {
+  const [lvf,setLvf]=useState("all"), [typf,setTypf]=useState("all");
+  const shown=questions.filter(q=>(lvf==="all"||q.level===lvf)&&(typf==="all"||q.type===typf));
+  return (
+    <div>
+      <div style={{display:"flex",gap:8,padding:"14px 20px",borderBottom:`1px solid ${C.s100}`,flexWrap:"wrap",alignItems:"center"}}>
+        <span style={{color:C.s400}}>{I(Ic.Filter,13)}</span>
+        {[["all","Tất cả",C.s900],["A","Mức A",C.b600],["B","Mức B",C.g600],["C","Mức C",C.a600]].map(([v,l,c])=>(
+          <button key={v} onClick={()=>setLvf(v)} style={{padding:"4px 12px",borderRadius:99,border:"none",cursor:"pointer",fontSize:12,fontWeight:700,background:lvf===v?c:C.s100,color:lvf===v?"white":C.s500,transition:"all 0.15s"}}>{l}</button>
+        ))}
+        <div style={{width:1,height:16,background:C.s200,margin:"0 2px"}}/>
+        {[["all","Tất cả"],["multiple_choice","Trắc nghiệm"],["true_false","Đúng/Sai"],["short_answer","Câu ngắn"]].map(([v,l])=>(
+          <button key={v} onClick={()=>setTypf(v)} style={{padding:"4px 12px",borderRadius:99,border:"none",cursor:"pointer",fontSize:12,fontWeight:700,background:typf===v?C.p600:C.s100,color:typf===v?"white":C.s500,transition:"all 0.15s"}}>{l}</button>
+        ))}
+        <div style={{flex:1}}/><span style={{fontSize:11,color:C.s400}}>{shown.length}/{questions.length} câu</span>
+      </div>
+      {shown.length===0 ? <div style={{padding:48,textAlign:"center",color:C.s400}}>Không có câu hỏi phù hợp với bộ lọc.</div>
+        : shown.map((q,i)=><QuestionCard key={q.id||i} q={q} num={questions.indexOf(q)+1}/>)}
+    </div>
+  );
+}
+
+function QuestionCard({ q, num }) {
+  const [open,setOpen]=useState(false);
+  return (
+    <div style={{borderBottom:`1px solid ${C.s50}`}}>
+      <button onClick={()=>setOpen(!open)} style={{width:"100%",padding:"15px 22px",background:"none",border:"none",cursor:"pointer",textAlign:"left",display:"flex",alignItems:"flex-start",gap:12}}>
+        <div style={{display:"flex",gap:6,alignItems:"center",flexShrink:0,marginTop:3}}>
+          <span style={{width:27,height:19,background:C.g50,color:C.g600,borderRadius:5,fontSize:10,fontWeight:900,display:"flex",alignItems:"center",justifyContent:"center"}}>#{num}</span>
+          <span style={{width:8,height:8,borderRadius:"50%",background:LVL_C[q.level]||C.s400,flexShrink:0}}/>
+        </div>
+        <div style={{flex:1}}>
+          <div style={{display:"flex",gap:6,marginBottom:5,flexWrap:"wrap",alignItems:"center"}}>
+            <span style={{fontSize:9,fontWeight:700,color:C.s400,fontFamily:"monospace"}}>{q.code}</span>
+            <span style={{fontSize:10,fontWeight:700,color:LVL_C[q.level]||C.s400,background:LVL_BG[q.level]||C.s50,padding:"1px 7px",borderRadius:4}}>Mức {q.level}</span>
+            <span style={{fontSize:10,fontWeight:700,color:C.p600,background:C.p50,padding:"1px 7px",borderRadius:4}}>{TYPE_LABEL[q.type]||q.type}</span>
+          </div>
+          <p style={{fontSize:14,color:C.s800,lineHeight:1.5}}>{q.content}</p>
+        </div>
+        <span style={{flexShrink:0,color:C.s300,fontSize:14,display:"inline-block",transform:open?"rotate(180deg)":"none",transition:"transform 0.2s",marginTop:3}}>▾</span>
+      </button>
+      {open&&(
+        <div style={{padding:"0 22px 20px",paddingLeft:22+27+12}}>
+          {q.type==="multiple_choice"&&q.options?.length>0&&(
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:7,marginBottom:14}}>
+              {q.options.map((opt,i)=>{const ok=opt.trim().startsWith(q.answer); return(
+                <div key={i} style={{padding:"9px 12px",borderRadius:10,fontSize:13,fontWeight:ok?700:400,background:ok?C.g50:C.s50,border:`1px solid ${ok?C.g200:C.s200}`,color:ok?C.g800:C.s600}}>
+                  {ok&&"✓ "}{opt}
+                </div>
+              );})}
+            </div>
+          )}
+          {q.type==="true_false"&&q.subQuestions?.length>0&&(
+            <div style={{marginBottom:14}}>
+              {q.subQuestions.map((sub,i)=>(
+                <div key={sub.id} style={{display:"flex",alignItems:"flex-start",gap:9,padding:"9px 12px",borderRadius:10,marginBottom:6,background:sub.answer==="true"?C.g50:C.r50,border:`1px solid ${sub.answer==="true"?C.g200:C.r100}`}}>
+                  <span style={{fontSize:12,fontWeight:900,color:sub.answer==="true"?C.g600:C.r600,flexShrink:0}}>✓</span>
+                  <span style={{fontSize:13,color:C.s700}}><strong style={{color:C.s400,marginRight:5}}>{String.fromCharCode(97+i)})</strong>{sub.content}</span>
+                  <span style={{marginLeft:"auto",flexShrink:0,fontSize:11,fontWeight:700,color:sub.answer==="true"?C.g600:C.r600}}>{sub.answer==="true"?"Đúng":"Sai"}</span>
+                </div>
+              ))}
+            </div>
+          )}
+          {q.type==="short_answer"&&<div style={{marginBottom:12,padding:"10px 14px",background:C.p50,border:`1px solid ${C.p100}`,borderRadius:10}}><span style={{fontSize:11,fontWeight:700,color:C.p600}}>Đáp án: </span><span style={{fontSize:13,color:C.s700}}>{q.answer}</span></div>}
+          <div style={{padding:"12px 15px",background:C.s50,borderRadius:11,borderLeft:`3px solid ${C.g600}`}}>
+            <p style={{fontSize:12,color:C.s600,lineHeight:1.65,marginBottom:q.commonErrors?6:0}}><strong style={{color:C.s800}}>💡 Giải thích:</strong> {q.explanation}</p>
+            {q.commonErrors&&<p style={{fontSize:11,color:C.r600,margin:0}}><strong>⚠️ Lỗi thường gặp:</strong> {q.commonErrors}</p>}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function DownloadTab({ questions, onDownload }) {
+  return (
+    <div style={{padding:26}}>
+      <div style={{display:"flex",alignItems:"flex-start",justifyContent:"space-between",gap:16,marginBottom:22,flexWrap:"wrap"}}>
+        <div><h3 style={{fontSize:16,fontWeight:900,color:C.s900,marginBottom:5}}>Xuất ngân hàng câu hỏi</h3><p style={{fontSize:13,color:C.s400}}>Tải về file CSV để mở bằng Excel hoặc Google Sheets.</p></div>
+        <Btn onClick={onDownload} sx={{borderRadius:12,flexShrink:0}}>{I(Ic.Down,15)} Tải CSV</Btn>
+      </div>
+      <div style={{overflowX:"auto",border:`1px solid ${C.s200}`,borderRadius:14}}>
+        <table style={{width:"100%",borderCollapse:"collapse",fontSize:13}}>
+          <thead><tr style={{background:C.s50,borderBottom:`1px solid ${C.s200}`}}>{["#","Mã đề","Mức","Loại","Câu hỏi","Đáp án"].map(h=><th key={h} style={{padding:"11px 14px",textAlign:"left",fontSize:9,fontWeight:900,color:C.s400,textTransform:"uppercase",letterSpacing:"0.08em",whiteSpace:"nowrap"}}>{h}</th>)}</tr></thead>
+          <tbody>
+            {questions.map((q,i)=>{
+              const ans=q.type==="true_false"?(q.subQuestions?.map((s,j)=>`${String.fromCharCode(97+j)}:${s.answer==="true"?"Đ":"S"}`).join(" ")||""):q.answer;
+              return <tr key={q.id||i} style={{borderBottom:`1px solid ${C.s50}`}}>
+                <td style={{padding:"10px 14px",color:C.s400,fontSize:12,width:32}}>{i+1}</td>
+                <td style={{padding:"10px 14px",fontFamily:"monospace",fontWeight:700,color:C.g600,fontSize:11,whiteSpace:"nowrap"}}>{q.code||"—"}</td>
+                <td style={{padding:"10px 14px"}}><Badge level={q.level}/></td>
+                <td style={{padding:"10px 14px",fontSize:11,color:C.p600,fontWeight:700,whiteSpace:"nowrap"}}>{TYPE_LABEL[q.type]||q.type}</td>
+                <td style={{padding:"10px 14px",color:C.s800,maxWidth:280,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{q.content}</td>
+                <td style={{padding:"10px 14px",fontWeight:700,color:C.g700,whiteSpace:"nowrap"}}>{ans||"—"}</td>
+              </tr>;
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function ShareSection({ onShare, codes, justCopied }) {
+  const LVS=[{id:"A",name:"Mức A — Biết",sub:"Dành cho HS cần hỗ trợ",e:"📗",c:C.b600,bg:"rgba(37,99,235,.12)"},{id:"B",name:"Mức B — Hiểu",sub:"Dành cho HS Khá",e:"📘",c:C.g600,bg:"rgba(5,150,105,.12)"},{id:"C",name:"Mức C — Vận dụng",sub:"Dành cho HS Giỏi",e:"📙",c:C.a600,bg:"rgba(217,119,6,.12)"},{id:"all",name:"Tổng hợp A+B+C",sub:"Dành cho cả lớp",e:"📕",c:C.p600,bg:"rgba(124,58,237,.12)"}];
+  return (
+    <div style={{background:`linear-gradient(135deg,${C.g700},${C.g600})`,padding:"26px 24px",borderRadius:26,color:"white",boxShadow:`0 16px 50px ${C.g600}30`}}>
+      <div style={{textAlign:"center",marginBottom:22}}>
+        <div style={{fontSize:24,marginBottom:5}}>🚀</div>
+        <h3 style={{fontSize:20,fontWeight:900,marginBottom:7}}>Chia sẻ bài tập cho học sinh</h3>
+        <p style={{color:"rgba(255,255,255,.72)",fontSize:13}}>Tạo mã bài tập → học sinh nhập mã ở trang chủ để làm bài ngay, kết quả tự động lưu về Firebase.</p>
+      </div>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(178px,1fr))",gap:11}}>
+        {LVS.map(lv=>{
+          const done=justCopied===lv.id, has=!!codes[lv.id];
+          return (
+            <div key={lv.id} style={{background:lv.bg,padding:17,borderRadius:18,border:"1px solid rgba(255,255,255,.18)",display:"flex",flexDirection:"column",gap:10}}>
+              <div style={{display:"flex",alignItems:"center",gap:9}}>
+                <span style={{fontSize:20}}>{lv.e}</span>
+                <div><div style={{fontWeight:900,fontSize:13,lineHeight:1.2}}>{lv.name}</div><div style={{fontSize:11,color:"rgba(255,255,255,.6)",marginTop:2}}>{lv.sub}</div></div>
+              </div>
+              {has&&<div style={{background:"rgba(255,255,255,.16)",padding:"8px 12px",borderRadius:11,textAlign:"center"}}><div style={{fontSize:9,color:"rgba(255,255,255,.6)",textTransform:"uppercase",letterSpacing:"0.12em",marginBottom:2}}>Mã bài tập</div><div style={{fontSize:22,fontWeight:900,letterSpacing:"0.25em",fontFamily:"monospace"}}>{codes[lv.id]}</div></div>}
+              <button onClick={()=>onShare(lv.id)} style={{padding:"9px 0",background:done?"rgba(255,255,255,.93)":"rgba(255,255,255,.2)",color:done?C.g700:"white",fontWeight:900,borderRadius:11,border:"none",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",gap:6,fontSize:13,transition:"all 0.2s"}}>
+                {done?I(Ic.Check):I(Ic.Copy)} {done?"Đã copy mã!":has?"Tạo mã mới":"Tạo mã bài tập"}
+              </button>
+            </div>
+          );
+        })}
+      </div>
+      <p style={{textAlign:"center",fontSize:11,color:"rgba(255,255,255,.45)",marginTop:15}}>💡 Học sinh vào trang chủ → ô "Dành cho Học sinh" → nhập mã → bắt đầu làm bài</p>
+    </div>
+  );
+}
+
+function ResultsSection() {
+  const [code,setCode]=useState(""), [results,setResults]=useState(null), [loading,setLoading]=useState(false), [searched,setSearched]=useState(false);
+  const load = async () => {
+    if (!code.trim()) return;
+    setLoading(true); setSearched(false);
+    try { const data=await loadResults(code.trim()); setResults(data); } catch(e) { setResults([]); }
+    setLoading(false); setSearched(true);
+  };
+  const exportCSV = () => {
+    if (!results?.length) return;
+    const hdr=["STT","Họ tên","Mã HS","Lớp","Mức","Điểm","Tổng","Tỷ lệ%","Xếp loại","Thời gian nộp"];
+    const rows=results.map((r,i)=>[i+1,r.studentName,r.studentId||"",r.className||"",r.quizLevel,r.score,r.total,Math.round(r.percentage),r.grade,r.submittedAt].map(v=>`"${String(v||"").replace(/"/g,'""')}"`).join(","));
+    const blob=new Blob(["\uFEFF"+[hdr.join(","),...rows].join("\r\n")],{type:"text/csv;charset=utf-8;"});
+    const a=document.createElement("a"); a.href=URL.createObjectURL(blob); a.download=`KetQua_${code}.csv`; a.click();
+  };
+  const avg=results?.length?Math.round(results.reduce((s,r)=>s+r.percentage,0)/results.length):0;
+  const gcnt=results?.reduce((acc,r)=>({...acc,[r.grade]:(acc[r.grade]||0)+1}),{})||{};
+  return (
+    <div className="fade-in" style={{display:"flex",flexDirection:"column",gap:22,maxWidth:920}}>
+      <h2 style={{fontSize:24,fontWeight:900,color:C.s900}}>Kết quả học sinh 📊</h2>
+      <div style={{background:"white",padding:22,borderRadius:20,border:`1px solid ${C.s100}`,boxShadow:"0 2px 10px rgba(0,0,0,.04)"}}>
+        <p style={{fontSize:13,color:C.s400,marginBottom:12}}>Nhập mã bài tập để xem danh sách kết quả học sinh đã nộp.</p>
+        <div style={{display:"flex",gap:9,flexWrap:"wrap"}}>
+          <input value={code} onChange={e=>setCode(e.target.value.toUpperCase())} onKeyDown={e=>e.key==="Enter"&&code&&load()}
+            placeholder="Nhập mã bài tập (VD: ABC123)"
+            style={{flex:1,minWidth:180,padding:"12px 15px",background:C.s50,border:`1.5px solid ${C.s200}`,borderRadius:12,fontSize:14,fontFamily:"monospace",fontWeight:700,outline:"none",color:C.s900}}/>
+          <Btn onClick={load} disabled={loading||!code.trim()} sx={{borderRadius:12}}>
+            {loading?<Ic.Spin width={16} height={16} style={{color:C.w}}/>:I(Ic.Eye)} Xem kết quả
+          </Btn>
+          {results?.length>0&&<Btn onClick={exportCSV} variant="outline" sx={{borderRadius:12}}>{I(Ic.Down)} Xuất CSV</Btn>}
+        </div>
+      </div>
+      {results?.length>0&&(
+        <>
+          <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(130px,1fr))",gap:11}}>
+            {[{l:"Số học sinh",v:results.length,c:C.b600,bg:C.b50},{l:"Điểm trung bình",v:`${avg}%`,c:C.g600,bg:C.g50},
+              ...["Giỏi","Khá","Trung bình","Yếu"].map(g=>({l:g,v:gcnt[g]||0,c:gradeColor(g),bg:gradeBg(g),u:"HS"}))
+            ].map((s,i)=><div key={i} style={{background:"white",padding:"15px 17px",borderRadius:15,border:`1px solid ${C.s100}`}}><div style={{fontSize:12,color:C.s400,marginBottom:4}}>{s.l}</div><div style={{fontSize:22,fontWeight:900,color:s.c}}>{s.v}<span style={{fontSize:11,color:C.s400,fontWeight:500,marginLeft:2}}>{s.u||""}</span></div></div>)}
+          </div>
+          <div style={{background:"white",borderRadius:20,border:`1px solid ${C.s100}`,overflow:"hidden"}}>
+            <div style={{overflowX:"auto"}}>
+              <table style={{width:"100%",borderCollapse:"collapse"}}>
+                <thead><tr style={{background:C.s50,borderBottom:`1px solid ${C.s200}`}}>{["STT","Họ và tên","Mã HS","Lớp","Mức","Điểm","Tỷ lệ","Xếp loại","Thời gian nộp"].map(h=><th key={h} style={{padding:"12px 14px",textAlign:"left",fontSize:9,fontWeight:900,color:C.s400,textTransform:"uppercase",whiteSpace:"nowrap"}}>{h}</th>)}</tr></thead>
+                <tbody>
+                  {results.map((r,i)=>(
+                    <tr key={i} style={{borderBottom:`1px solid ${C.s50}`}}>
+                      <td style={{padding:"11px 14px",color:C.s400,fontSize:12,width:36}}>{i+1}</td>
+                      <td style={{padding:"11px 14px",fontWeight:800,color:C.s900,fontSize:13}}>{r.studentName}</td>
+                      <td style={{padding:"11px 14px",fontFamily:"monospace",color:C.s500,fontSize:12}}>{r.studentId||"—"}</td>
+                      <td style={{padding:"11px 14px",color:C.s600,fontSize:13}}>{r.className||"—"}</td>
+                      <td style={{padding:"11px 14px"}}><span style={{fontSize:10,fontWeight:700,color:"white",background:{A:C.b600,B:C.g600,C:C.a600,all:C.p600}[r.quizLevel]||C.s400,padding:"2px 8px",borderRadius:99}}>{r.quizLevel==="all"?"Tổng hợp":`Mức ${r.quizLevel}`}</span></td>
+                      <td style={{padding:"11px 14px",fontWeight:800,color:C.g600,fontSize:14}}>{r.score}/{r.total}</td>
+                      <td style={{padding:"11px 14px",fontSize:13}}>
+                        <div style={{display:"flex",alignItems:"center",gap:7}}>
+                          <div style={{flex:1,maxWidth:72,height:5,background:C.s200,borderRadius:99}}><div style={{height:5,width:`${r.percentage}%`,background:gradeColor(r.grade),borderRadius:99}}/></div>
+                          <span style={{fontSize:12,fontWeight:700,color:C.s600}}>{Math.round(r.percentage)}%</span>
+                        </div>
+                      </td>
+                      <td style={{padding:"11px 14px"}}><span style={{padding:"3px 10px",background:gradeBg(r.grade),color:gradeColor(r.grade),borderRadius:7,fontSize:11,fontWeight:900}}>{r.grade}</span></td>
+                      <td style={{padding:"11px 14px",color:C.s400,fontSize:11,whiteSpace:"nowrap"}}>{new Date(r.submittedAt).toLocaleString("vi-VN")}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </>
+      )}
+      {searched&&!results?.length&&<div style={{textAlign:"center",padding:"54px 20px",background:"white",borderRadius:20,border:`2px dashed ${C.s200}`}}><div style={{fontSize:36,marginBottom:12}}>🔍</div><p style={{fontWeight:700,color:C.s700,marginBottom:5}}>Chưa có kết quả cho mã <span style={{fontFamily:"monospace",color:C.g600}}>{code}</span></p><p style={{color:C.s400,fontSize:13}}>Học sinh chưa nộp bài, hoặc mã không đúng.</p></div>}
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════
+// STUDENT APP
+// ═══════════════════════════════════════════════════════
+function StudentApp({ initCode, onHome }) {
+  const [step,     setStep]    = useState(initCode?"loading":"enter");
+  const [code,     setCode]    = useState(initCode||"");
+  const [quiz,     setQuiz]    = useState(null);
+  const [err,      setErr]     = useState("");
+  const [info,     setInfo]    = useState({name:"",studentId:"",className:""});
+  const [idx,      setIdx]     = useState(0);
+  const [log,      setLog]     = useState([]);
+  const [sel,      setSel]     = useState(null);
+  const [tfPick,   setTfPick]  = useState({});
+  const [shortVal, setShortVal]= useState("");
+  const [confirmed,setConfirmed]=useState(false);
+  const [result,   setResult]  = useState(null);
+  const [saving,   setSaving]  = useState(false);
+
+  useEffect(()=>{ if(initCode) doLoad(initCode); },[]);
+
+  const doLoad = async c => {
+    setStep("loading"); setErr("");
+    try { const data=await loadQuiz(c.trim()); if(!data){setErr(`Không tìm thấy bài tập mã "${c.toUpperCase()}". Kiểm tra lại mã.`);setStep("enter");}else{setQuiz(data);setStep("info");} }
+    catch(e) { setErr("Lỗi kết nối: "+e.message); setStep("enter"); }
+  };
+
+  const q=quiz?.questions?.[idx], totalQ=quiz?.questions?.length||0;
+
+  const confirm = () => {
+    if(!q||confirmed) return;
+    let ans="", ok=false;
+    if(q.type==="multiple_choice") { ans=sel||""; ok=!!sel&&sel.toUpperCase()===q.answer.trim()[0].toUpperCase(); }
+    else if(q.type==="true_false") { ans=JSON.stringify(tfPick); ok=(q.subQuestions?.every(s=>tfPick[s.id]===s.answer)??false); }
+    else { ans=shortVal.trim(); const al=q.answer.toLowerCase(),ul=ans.toLowerCase(); ok=ul.length>0&&(al.includes(ul)||ul.includes(al.substring(0,Math.min(al.length,14)))); }
+    const rec={questionId:q.id,type:q.type,level:q.level,question:q.content,answer:ans,isCorrect:ok,explanation:q.explanation,commonErrors:q.commonErrors};
+    setResult(rec); setLog(prev=>[...prev,rec]); setConfirmed(true);
+  };
+
+  const next = () => {
+    const nextIdx=idx+1;
+    setSel(null); setTfPick({}); setShortVal(""); setConfirmed(false); setResult(null);
+    if(nextIdx<totalQ) { setIdx(nextIdx); }
+    else {
+      setLog(prev=>{
+        const all=prev, sc=all.filter(a=>a.isCorrect).length, pct=(sc/totalQ)*100;
+        setSaving(true);
+        saveResult(code.toUpperCase(),{studentName:info.name,studentId:info.studentId,className:info.className,quizId:code.toUpperCase(),quizLevel:quiz.level,score:sc,total:totalQ,percentage:pct,grade:getGrade(pct),submittedAt:new Date().toISOString()})
+          .catch(e=>console.error("Lỗi lưu kết quả:",e))
+          .finally(()=>setSaving(false));
+        return all;
+      });
+      setStep("finished");
+    }
+  };
+
+  const sc=log.filter(a=>a.isCorrect).length, pct=totalQ>0?(sc/totalQ)*100:0, grd=getGrade(pct);
+
+  return (
+    <div style={{minHeight:"100vh",background:C.s50}}>
+      <div style={{background:"white",borderBottom:`1px solid ${C.s100}`,padding:"12px 22px",display:"flex",alignItems:"center",gap:12}}>
+        <Logo/><div style={{flex:1}}/>
+        {quiz&&<div style={{padding:"4px 13px",background:C.g100,color:C.g800,borderRadius:99,fontSize:11,fontWeight:900}}>{quiz.level==="all"?"Tổng hợp":`Mức ${quiz.level}`}</div>}
+        {step==="quiz"&&<div style={{fontSize:12,fontWeight:700,color:C.s400}}>{idx+1}/{totalQ}</div>}
+        <button onClick={onHome} style={{fontSize:12,fontWeight:700,color:C.s400,background:"none",border:"none",cursor:"pointer",padding:"5px 8px"}}>Trang chủ</button>
+      </div>
+
+      <div style={{maxWidth:630,margin:"0 auto",padding:"28px 16px 60px"}}>
+
+        {step==="enter"&&(
+          <div className="fade-in" style={{background:"white",borderRadius:22,padding:30,boxShadow:"0 4px 24px rgba(0,0,0,.07)"}}>
+            <div style={{fontSize:34,marginBottom:14}}>🎯</div>
+            <h2 style={{fontSize:22,fontWeight:900,color:C.s900,marginBottom:8}}>Nhập mã bài tập</h2>
+            <p style={{color:C.s400,fontSize:14,marginBottom:22}}>Nhập mã bài tập do giáo viên cung cấp.</p>
+            {err&&<div style={{background:C.r50,color:C.r600,padding:"12px 15px",borderRadius:12,marginBottom:16,fontSize:13,border:`1px solid ${C.r100}`}}>{err}</div>}
+            <input value={code} onChange={e=>setCode(e.target.value.toUpperCase())} maxLength={8} onKeyDown={e=>e.key==="Enter"&&code.trim()&&doLoad(code)}
+              placeholder="Ví dụ: ABC123"
+              style={{width:"100%",padding:"16px",background:C.s50,border:`2px solid ${C.s200}`,borderRadius:14,fontSize:22,fontFamily:"monospace",fontWeight:900,letterSpacing:"0.22em",outline:"none",color:C.s900,textAlign:"center",marginBottom:12}}/>
+            <Btn onClick={()=>code.trim()&&doLoad(code)} sx={{width:"100%",padding:16,fontSize:15,borderRadius:15}}>Vào bài {I(Ic.Arrow,18)}</Btn>
+          </div>
+        )}
+
+        {step==="loading"&&<div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:18,padding:70}}><Ic.Spin width={44} height={44} style={{color:C.g600}}/><p style={{color:C.s600,fontWeight:600,fontSize:15}}>Đang tải bài tập...</p></div>}
+
+        {step==="info"&&(
+          <div className="fade-in" style={{background:"white",borderRadius:22,padding:30,boxShadow:"0 4px 24px rgba(0,0,0,.07)"}}>
+            <div style={{background:C.g50,border:`1px solid ${C.g100}`,borderRadius:14,padding:"14px 18px",marginBottom:22}}>
+              <div style={{fontSize:14,fontWeight:700,color:C.g800}}>{quiz?.title}</div>
+              <div style={{fontSize:12,color:C.g600,marginTop:4}}>{quiz?.questions?.length} câu · {quiz?.level==="all"?"Tổng hợp A+B+C":`Phân hóa mức ${quiz?.level}`}</div>
+            </div>
+            <h2 style={{fontSize:20,fontWeight:900,color:C.s900,marginBottom:18}}>Thông tin của bạn</h2>
+            {[{k:"name",l:"Họ và tên",ph:"Nguyễn Văn An",req:true},{k:"studentId",l:"Mã học sinh",ph:"HS001"},{k:"className",l:"Lớp",ph:"10A1"}].map(f=>(
+              <div key={f.k} style={{marginBottom:14}}>
+                <label style={{display:"block",fontSize:10,fontWeight:900,textTransform:"uppercase",letterSpacing:"0.12em",color:C.s400,marginBottom:6}}>{f.l} {f.req&&<span style={{color:C.r600}}>*</span>}</label>
+                <input value={info[f.k]} onChange={e=>setInfo(p=>({...p,[f.k]:e.target.value}))} placeholder={f.ph}
+                  style={{width:"100%",padding:"12px 14px",background:C.s50,border:`1.5px solid ${C.s200}`,borderRadius:11,fontSize:14,outline:"none",color:C.s900}}/>
+              </div>
+            ))}
+            <Btn onClick={()=>info.name.trim()&&setStep("quiz")} disabled={!info.name.trim()} sx={{width:"100%",padding:16,fontSize:15,borderRadius:15,marginTop:6}}>
+              {I(Ic.Play,19)} Bắt đầu làm bài
+            </Btn>
+          </div>
+        )}
+
+        {step==="quiz"&&q&&(
+          <div className="fade-in" style={{display:"flex",flexDirection:"column",gap:14}}>
+            <div>
+              <div style={{display:"flex",justifyContent:"space-between",fontSize:12,color:C.s400,marginBottom:6}}>
+                <span>Câu {idx+1} / {totalQ}</span>
+                <span>{log.filter(a=>a.isCorrect).length} đúng · {log.filter(a=>!a.isCorrect).length} sai</span>
+              </div>
+              <div style={{height:6,background:C.s200,borderRadius:99,overflow:"hidden"}}>
+                <div style={{height:6,background:`linear-gradient(90deg,${C.g600},#10B981)`,borderRadius:99,width:`${((idx+(confirmed?1:0))/totalQ)*100}%`,transition:"width 0.4s"}}/>
+              </div>
+            </div>
+            <div style={{background:"white",borderRadius:22,padding:26,boxShadow:"0 4px 24px rgba(0,0,0,.07)"}}>
+              <div style={{display:"flex",gap:7,marginBottom:16,flexWrap:"wrap",alignItems:"center"}}>
+                <span style={{fontSize:10,fontWeight:900,color:C.g600,background:C.g50,padding:"3px 9px",borderRadius:6}}>Câu {idx+1}</span>
+                <span style={{fontSize:10,fontWeight:700,color:C.p600,background:C.p50,padding:"3px 9px",borderRadius:6}}>{TYPE_LABEL[q.type]}</span>
+                <span style={{fontSize:10,fontWeight:700,color:LVL_C[q.level]||C.s400,background:LVL_BG[q.level]||C.s50,padding:"3px 9px",borderRadius:6}}>Mức {q.level}</span>
+              </div>
+              <p style={{fontSize:17,fontWeight:700,color:C.s900,lineHeight:1.5,marginBottom:22,whiteSpace:"pre-wrap"}}>{q.content}</p>
+
+              {q.type==="multiple_choice"&&(
+                <div style={{display:"flex",flexDirection:"column",gap:9}}>
+                  {q.options?.map((opt,i)=>{
+                    const ltr=opt.trim()[0], selected=sel===ltr;
+                    const isRight=confirmed&&ltr===q.answer.trim()[0].toUpperCase(), isWrong=confirmed&&selected&&!isRight;
+                    return <button key={i} onClick={()=>!confirmed&&setSel(ltr)} style={{padding:"13px 17px",borderRadius:14,fontSize:14,fontWeight:selected||isRight?700:500,cursor:confirmed?"default":"pointer",textAlign:"left",transition:"all 0.15s",border:"2px solid",
+                      background:isRight?C.g50:isWrong?C.r50:selected?C.b50:C.s50,
+                      borderColor:isRight?C.g600:isWrong?"#EF4444":selected?C.b600:C.s200,
+                      color:isRight?C.g800:isWrong?"#991B1B":selected?C.b600:C.s700}}>
+                      {isRight&&<span style={{marginRight:5}}>✓</span>}{isWrong&&<span style={{marginRight:5}}>✗</span>}{opt}
+                    </button>;
+                  })}
+                </div>
+              )}
+
+              {q.type==="true_false"&&(
+                <div>
+                  <div style={{display:"grid",gridTemplateColumns:"1fr 76px 76px",gap:7,padding:"8px 14px",background:C.s100,borderRadius:9,fontSize:9,fontWeight:900,textTransform:"uppercase",letterSpacing:"0.08em",color:C.s400,marginBottom:8}}>
+                    <span>Nhận định</span><span style={{textAlign:"center"}}>Đúng</span><span style={{textAlign:"center"}}>Sai</span>
+                  </div>
+                  {q.subQuestions?.map((sub,i)=>{
+                    const pk=tfPick[sub.id], corr=sub.answer, ok_=confirmed&&pk===corr, bad=confirmed&&pk!==undefined&&pk!==corr;
+                    return <div key={sub.id} style={{display:"grid",gridTemplateColumns:"1fr 76px 76px",gap:7,padding:"11px 14px",border:`1px solid ${bad?C.r100:ok_?C.g100:C.s200}`,background:bad?C.r50:ok_?C.g50:"white",borderRadius:13,marginBottom:8,alignItems:"center",transition:"all 0.2s"}}>
+                      <span style={{fontSize:14,color:C.s700,lineHeight:1.45}}><strong style={{color:C.s400,marginRight:6}}>{String.fromCharCode(97+i)})</strong>{sub.content}{confirmed&&<span style={{marginLeft:7,fontWeight:900,fontSize:13,color:ok_?C.g600:"#EF4444"}}>{ok_?"✓":"✗"}</span>}</span>
+                      {["true","false"].map(v=>{
+                        const active=pk===v, showAns=confirmed&&corr===v;
+                        return <button key={v} onClick={()=>!confirmed&&setTfPick(p=>({...p,[sub.id]:v}))} style={{height:38,borderRadius:99,cursor:confirmed?"default":"pointer",fontWeight:900,fontSize:12,transition:"all 0.15s",border:"2px solid",
+                          background:showAns?C.g600:active?({true:C.g600,false:"#EF4444"}[v]):"white",
+                          borderColor:showAns?C.g600:active?({true:C.g600,false:"#EF4444"}[v]):C.s200,
+                          color:showAns||active?"white":C.s400}}>{v==="true"?"Đúng":"Sai"}</button>;
+                      })}
+                    </div>;
+                  })}
+                </div>
+              )}
+
+              {q.type==="short_answer"&&(
+                <div>
+                  <textarea value={shortVal} onChange={e=>!confirmed&&setShortVal(e.target.value)} placeholder="Nhập câu trả lời của bạn..." disabled={confirmed}
+                    style={{width:"100%",padding:"13px 16px",background:C.s50,border:`1.5px solid ${confirmed?(result?.isCorrect?C.g200:"#FECACA"):C.s200}`,borderRadius:13,fontSize:14,outline:"none",resize:"vertical",minHeight:90,color:C.s900,transition:"border-color 0.2s"}}/>
+                  {confirmed&&<div style={{marginTop:9,padding:"11px 14px",background:C.p50,border:`1px solid ${C.p100}`,borderRadius:11}}><span style={{fontSize:11,fontWeight:700,color:C.p600}}>Đáp án tham khảo: </span><span style={{fontSize:13,color:C.s700}}>{q.answer}</span></div>}
+                </div>
+              )}
+
+              {confirmed&&result&&(
+                <div style={{marginTop:16,borderRadius:16,padding:18,border:`1.5px solid ${result.isCorrect?C.g200:"#FECACA"}`,background:result.isCorrect?"#F0FDF4":"#FEF2F2"}}>
+                  <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:11}}>
+                    <div style={{width:30,height:30,borderRadius:"50%",background:result.isCorrect?C.g600:"#EF4444",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,color:"white"}}>
+                      {result.isCorrect?I(Ic.Check,15):I(Ic.X,15)}
+                    </div>
+                    <span style={{fontWeight:900,color:result.isCorrect?C.g800:"#991B1B",fontSize:15}}>{result.isCorrect?"Trả lời đúng! 🎉":"Chưa chính xác"}</span>
+                  </div>
+                  <p style={{fontSize:13,color:C.s700,lineHeight:1.65,marginBottom:q.commonErrors?7:0}}><strong style={{color:C.s900}}>💡 Giải thích:</strong> {q.explanation}</p>
+                  {q.commonErrors&&<p style={{fontSize:12,color:"#B91C1C",margin:0}}><strong>⚠️ Lỗi thường gặp:</strong> {q.commonErrors}</p>}
+                </div>
+              )}
+
+              <div style={{marginTop:18}}>
+                {!confirmed
+                  ? <Btn onClick={confirm} sx={{width:"100%",padding:17,fontSize:15,borderRadius:16}}
+                      disabled={(q.type==="multiple_choice"&&!sel)||(q.type==="true_false"&&q.subQuestions?.some(s=>tfPick[s.id]===undefined))}>
+                      Xác nhận đáp án
+                    </Btn>
+                  : <Btn onClick={next} variant="dark" sx={{width:"100%",padding:16,fontSize:15,borderRadius:16}}>
+                      {idx<totalQ-1?"Câu tiếp theo":"Xem kết quả tổng kết"} {I(Ic.Arrow,18)}
+                    </Btn>
+                }
+              </div>
+            </div>
+          </div>
+        )}
+
+        {step==="finished"&&(
+          <div className="fade-in" style={{display:"flex",flexDirection:"column",gap:16}}>
+            <div style={{background:"white",borderRadius:22,padding:34,boxShadow:"0 4px 24px rgba(0,0,0,.07)",textAlign:"center"}}>
+              <div style={{fontSize:52,marginBottom:7}}>🏆</div>
+              <h2 style={{fontSize:24,fontWeight:900,color:C.s900,marginBottom:6}}>Hoàn thành bài thi!</h2>
+              <p style={{color:C.s400,fontSize:14,marginBottom:22}}>Xin chào <strong style={{color:C.g600}}>{info.name}</strong></p>
+              <div style={{display:"inline-flex",flexDirection:"column",alignItems:"center",background:`linear-gradient(135deg,${C.g50},white)`,border:`2px solid ${C.g200}`,borderRadius:20,padding:"20px 44px",marginBottom:22}}>
+                <div style={{fontSize:62,fontWeight:900,color:C.g600,lineHeight:1}}>{sc}</div>
+                <div style={{fontSize:18,color:C.s400}}>/ {totalQ} câu</div>
+                <div style={{marginTop:8,padding:"6px 22px",background:gradeColor(grd),color:"white",borderRadius:99,fontSize:15,fontWeight:900}}>{grd} — {Math.round(pct)}%</div>
+              </div>
+              <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:10,marginBottom:22}}>
+                {[{l:"Câu đúng",v:sc,c:C.g600,bg:C.g50},{l:"Câu sai",v:totalQ-sc,c:C.r600,bg:C.r50},{l:"Tổng câu",v:totalQ,c:C.s700,bg:C.s100}].map(s=>(
+                  <div key={s.l} style={{background:s.bg,borderRadius:13,padding:"13px 10px"}}>
+                    <div style={{fontSize:24,fontWeight:900,color:s.c}}>{s.v}</div>
+                    <div style={{fontSize:11,color:C.s400,marginTop:3}}>{s.l}</div>
+                  </div>
+                ))}
+              </div>
+              <p style={{fontSize:12,color:C.s400,marginBottom:20}}>
+                {saving?"⏳ Đang lưu kết quả...":"✅ Kết quả đã lưu vào Firebase và gửi về giáo viên."}
+              </p>
+              <Btn onClick={onHome} variant="ghost" sx={{borderRadius:13,padding:"11px 26px",margin:"0 auto"}}>{I(Ic.Home,16)} Về trang chủ</Btn>
+            </div>
+            <div style={{background:"white",borderRadius:22,overflow:"hidden",boxShadow:"0 4px 24px rgba(0,0,0,.07)"}}>
+              <div style={{padding:"17px 24px",borderBottom:`1px solid ${C.s100}`,fontWeight:900,color:C.s900,fontSize:15}}>📋 Xem lại từng câu</div>
+              {log.map((a,i)=>(
+                <div key={i} style={{padding:"14px 22px",borderBottom:`1px solid ${C.s50}`,display:"flex",gap:12,alignItems:"flex-start"}}>
+                  <div style={{width:28,height:28,borderRadius:"50%",background:a.isCorrect?C.g600:"#EF4444",flexShrink:0,display:"flex",alignItems:"center",justifyContent:"center",marginTop:1,color:"white"}}>
+                    {a.isCorrect?I(Ic.Check,13):I(Ic.X,13)}
+                  </div>
+                  <div style={{flex:1}}>
+                    <div style={{display:"flex",gap:6,marginBottom:5,flexWrap:"wrap"}}>
+                      <span style={{fontSize:10,fontWeight:900,color:C.g600,background:C.g50,padding:"1px 7px",borderRadius:4}}>Câu {i+1}</span>
+                      <span style={{fontSize:10,fontWeight:700,color:LVL_C[a.level]||C.s400,background:LVL_BG[a.level]||C.s50,padding:"1px 7px",borderRadius:4}}>Mức {a.level}</span>
+                    </div>
+                    <p style={{fontSize:13,color:C.s700,marginBottom:4,lineHeight:1.45}}>{a.question}</p>
+                    {!a.isCorrect&&a.explanation&&<p style={{fontSize:12,color:C.s400,fontStyle:"italic",lineHeight:1.45}}>{a.explanation}</p>}
+                  </div>
+                  <span style={{flexShrink:0,fontSize:18}}>{a.isCorrect?"✅":"❌"}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+const root = ReactDOM.createRoot(document.getElementById("root"));
+root.render(<App/>);
+</script>
+</body>
+</html>
